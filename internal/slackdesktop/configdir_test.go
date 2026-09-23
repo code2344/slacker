@@ -1,6 +1,7 @@
 package slackdesktop
 
 import (
+	"path"
 	"path/filepath"
 	"testing"
 )
@@ -55,7 +56,7 @@ func TestConfigDirForOSWindowsReturnsSecondWhenFirstDoestNotExist(t *testing.T) 
 
 func TestConfigDirForOSDarwinPrefersFirstExisting(t *testing.T) {
 	home := "/Users/x"
-	first := filepath.Join(home, "Library", "Application Support", "Slack")
+	first := path.Join(home, "Library", "Application Support", "Slack")
 	got := configDirForOS("darwin", func(k string) string {
 		if k == "HOME" {
 			return home
@@ -69,9 +70,9 @@ func TestConfigDirForOSDarwinPrefersFirstExisting(t *testing.T) {
 
 func TestConfigDirForOSLinuxPackaging(t *testing.T) {
 	home := "/home/x"
-	native := filepath.Join(home, ".config", "Slack")
-	flatpak := filepath.Join(home, ".var", "app", "com.slack.Slack", "config", "Slack")
-	snap := filepath.Join(home, "snap", "slack", "current", ".config", "Slack")
+	native := path.Join(home, ".config", "Slack")
+	flatpak := path.Join(home, ".var", "app", "com.slack.Slack", "config", "Slack")
+	snap := path.Join(home, "snap", "slack", "current", ".config", "Slack")
 
 	cases := []struct {
 		name   string
