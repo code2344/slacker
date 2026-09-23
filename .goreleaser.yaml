@@ -1,0 +1,51 @@
+version: 2
+project_name: slacker
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+builds:
+  - id: slacker
+    main: .
+    binary: slacker
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux, windows, freebsd]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: [-s -w]
+archives:
+  - id: archives
+    ids: [slacker]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ title .Os }}_{{ if eq .Arch \"amd64\" }}x86_64{{ else }}{{ .Arch }}{{ end }}"
+    files: [LICENSE, README.md, THIRD_PARTY_NOTICES.md]
+nfpms:
+  - id: linux-packages
+    package_name: slacker
+    ids: [slacker]
+    vendor: code2344
+    homepage: https://github.com/code2344/slacker
+    maintainer: code2344
+    description: Keyboard-driven Slack terminal client
+    license: GPL-3.0
+    formats: [deb, rpm, apk]
+    bindir: /usr/bin
+checksum:
+  name_template: checksums.txt
+sboms:
+  - artifacts: archive
+  - id: package-sbom
+    artifacts: package
+changelog:
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:"]
+release:
+  github:
+    owner: code2344
+    name: slacker
+  draft: false
+  prerelease: auto
