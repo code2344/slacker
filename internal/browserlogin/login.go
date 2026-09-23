@@ -2,6 +2,8 @@ package browserlogin
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +16,8 @@ import (
 	"github.com/browserutils/kooky"
 	_ "github.com/browserutils/kooky/browser/all"
 	"github.com/code2344/slacker/internal/slackdesktop"
+	"github.com/golang/snappy"
+	_ "modernc.org/sqlite"
 )
 
 type Session struct {
@@ -77,6 +81,15 @@ func discover(ctx context.Context) ([]Session, error) {
 			tokens[teamID] = token
 		}
 	}
+	for _, dbPath := range firefoxLocalStorageDatabases() {
+		found, err := firefoxTokens(dbPath)
+		if err != nil {
+			continue
+		}
+		for teamID, token := range found {
+			tokens[teamID] = token
+		}
+	}
 	if len(tokens) == 0 {
 		return nil, errors.New("Slack browser token is not available yet")
 	}
@@ -87,6 +100,76 @@ func discover(ctx context.Context) ([]Session, error) {
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].TeamID < result[j].TeamID })
+	return result, nil
+}
+
+func firefoxLocalStorageDatabases() []string {
+	home, _ := os.UserHomeDir()
+	var profiles string
+	switch runtime.GOOS {
+	case "darwin":
+		profiles = filepath.Join(home, "Library", "Application Support", "Firefox", "Profiles")
+	case "windows":
+		profiles = filepath.Join(os.Getenv("APPDATA"), "Mozilla", "Firefox", "Profiles")
+	default:
+		profiles = filepath.Join(home, ".mozilla", "firefox")
+	}
+	matches, _ := filepath.Glob(filepath.Join(profiles, "*", "storage", "default", "*slack.com*", "ls", "data.sqlite"))
+	return matches
+}
+
+func firefoxTokens(dbPath string) (map[string]string, error) {
+	source, err := os.Open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer source.Close()
+	tmp, err := os.CreateTemp("", "slacker-firefox-localstorage-*.sqlite")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.ReadFrom(source); err != nil {
+		tmp.Close()
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", tmpPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	var compression int
+	var value []byte
+	if err := db.QueryRow(`SELECT compression_type, value FROM data WHERE key = 'localConfig_v2'`).Scan(&compression, &value); err != nil {
+		return nil, err
+	}
+	if compression == 1 {
+		value, err = snappy.Decode(nil, value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var config struct {
+		Teams map[string]struct {
+			Token string `json:"token"`
+		} `json:"teams"`
+	}
+	if err := json.Unmarshal(value, &config); err != nil {
+		return nil, err
+	}
+	result := map[string]string{}
+	for teamID, team := range config.Teams {
+		if team.Token != "" {
+			result[teamID] = team.Token
+		}
+	}
+	if len(result) == 0 {
+		return nil, errors.New("Firefox Slack local storage has no workspace token")
+	}
 	return result, nil
 }
 
