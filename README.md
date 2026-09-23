@@ -55,6 +55,22 @@ Importing Slack Desktop remains available as a fallback:
 slacker workspace add --desktop
 ```
 
+If automatic browser detection is unavailable, link the browser session using
+its Slack cookie:
+
+```sh
+slacker workspace link https://example.slack.com
+```
+
+Slacker will show where to find the `d` cookie in Firefox Developer Tools,
+derive the corresponding web-client token, validate the pair, and only then
+save it. If Slack no longer exposes a token from the workspace page, the
+explicit fallback accepts both values:
+
+```sh
+slacker workspace add --manual --domain example
+```
+
 Workspace commands:
 
 ```sh

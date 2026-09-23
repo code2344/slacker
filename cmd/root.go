@@ -70,7 +70,7 @@ func run(args []string) error {
 
 func runWorkspace(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: slacker workspace <add|list|current|use|remove|refresh>")
+		return errors.New("usage: slacker workspace <add|link|list|current|use|remove|refresh>")
 	}
 	store := workspace.New(workspace.DefaultPath())
 	switch args[0] {
@@ -112,9 +112,82 @@ func runWorkspace(args []string) error {
 		return refreshWorkspace(store)
 	case "add":
 		return addWorkspace(store, args[1:])
+	case "link":
+		return linkWorkspace(store, args[1:])
 	default:
 		return fmt.Errorf("unknown workspace command %q", args[0])
 	}
+}
+
+func linkWorkspace(store *workspace.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace link", flag.ContinueOnError)
+	domain := flags.String("domain", "", "workspace URL or subdomain")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *domain == "" && flags.NArg() > 0 {
+		*domain = flags.Arg(0)
+	}
+	reader := bufio.NewReader(os.Stdin)
+	if *domain == "" {
+		fmt.Print("Workspace URL (for example, https://example.slack.com): ")
+		value, _ := reader.ReadString('\n')
+		*domain = value
+	}
+	*domain = normalizeWorkspaceDomain(*domain)
+	if *domain == "" {
+		return errors.New("workspace URL or subdomain is required")
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return errors.New("manual linking requires an interactive terminal")
+	}
+	fmt.Println("In Firefox, open Developer Tools → Storage → Cookies, select slack.com, and copy the value of the cookie named `d`.")
+	fmt.Print("Slack d cookie: ")
+	cookieBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	if err != nil {
+		return err
+	}
+	cookie := normalizeCookie(strings.TrimSpace(string(cookieBytes)))
+	if cookie == "" {
+		return errors.New("the Slack d cookie is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	token, err := slack.MintToken(ctx, *domain, cookie)
+	if err != nil {
+		return fmt.Errorf("Slack did not expose a web token for that cookie; use `slacker workspace add --manual --domain %s` to enter both values: %w", *domain, err)
+	}
+	client, err := slack.NewClient(slack.Session{Token: token, Cookie: cookie})
+	if err != nil {
+		return err
+	}
+	auth, err := client.Connect(ctx)
+	if err != nil {
+		return fmt.Errorf("Slack rejected the linked browser session: %w", err)
+	}
+	meta := workspace.Metadata{TeamID: auth.TeamID, Name: auth.Team, Domain: *domain, APIURL: client.APIURL()}
+	if err := store.Put(meta, workspace.Secret{Token: token, Cookie: cookie}, true); err != nil {
+		return err
+	}
+	fmt.Printf("Linked %s (%s)\n", meta.Name, meta.TeamID)
+	return nil
+}
+
+func normalizeWorkspaceDomain(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "https://")
+	value = strings.TrimPrefix(value, "http://")
+	value = strings.TrimSuffix(value, "/")
+	value = strings.TrimSuffix(value, ".slack.com")
+	return value
+}
+
+func normalizeCookie(value string) string {
+	if decoded, err := url.PathUnescape(value); err == nil {
+		return decoded
+	}
+	return value
 }
 
 func addWorkspace(store *workspace.Store, args []string) error {
@@ -200,11 +273,11 @@ func addBrowserWorkspace(store *workspace.Store, selector string, all bool) erro
 	fmt.Println("1. Your default browser will open Slack's sign-in page.")
 	fmt.Println("2. Sign in and choose the workspace you want to use.")
 	fmt.Println("3. Leave this terminal open; setup continues automatically.")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	sessions, err := browserlogin.Login(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w; automatic browser linking is unavailable, so run `slacker workspace link <workspace-url>`", err)
 	}
 	added := 0
 	for _, session := range sessions {
@@ -260,7 +333,7 @@ func addManualWorkspace(store *workspace.Store, name, domain string) error {
 	if domain == "" {
 		fmt.Print("Workspace subdomain: ")
 		domain, _ = reader.ReadString('\n')
-		domain = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(domain, "https://"), ".slack.com"))
+		domain = normalizeWorkspaceDomain(domain)
 	}
 	if name == "" || domain == "" {
 		return errors.New("workspace name and domain are required")
@@ -268,6 +341,8 @@ func addManualWorkspace(store *workspace.Store, name, domain string) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return errors.New("manual credential entry requires an interactive terminal")
 	}
+	fmt.Println("In Firefox on app.slack.com, open Developer Tools → Console and run:")
+	fmt.Println(`Object.values(JSON.parse(localStorage.localConfig_v2).teams).forEach(t => console.log(t.name, "=>", t.token))`)
 	fmt.Print("xoxc token: ")
 	tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
@@ -280,7 +355,7 @@ func addManualWorkspace(store *workspace.Store, name, domain string) error {
 	if err != nil {
 		return err
 	}
-	secret := workspace.Secret{Token: strings.TrimSpace(string(tokenBytes)), Cookie: strings.TrimSpace(string(cookieBytes))}
+	secret := workspace.Secret{Token: strings.TrimSpace(string(tokenBytes)), Cookie: normalizeCookie(strings.TrimSpace(string(cookieBytes)))}
 	client, err := slack.NewClient(slack.Session{Token: secret.Token, Cookie: secret.Cookie})
 	if err != nil {
 		return err
@@ -443,10 +518,12 @@ func printUsage() {
 Usage:
   slacker                         Open the active workspace
   slacker workspace add [name]    Sign in with Slack in a browser
-	  --desktop                     Import an existing Slack Desktop session
+    --desktop                     Import an existing Slack Desktop session
+    --manual                      Enter both xoxc token and d cookie
+  slacker workspace link [url]    Link using a browser d cookie
   slacker workspace list          List configured workspaces
   slacker workspace use <name>    Change the active workspace
-	  slacker workspace refresh       Refresh the active browser token
+  slacker workspace refresh       Refresh the active browser token
   slacker doctor                  Validate the active session
   slacker api <method> [k=v ...]  Call a Slack client API method
   slacker version                 Print the version`)
