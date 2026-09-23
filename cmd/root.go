@@ -196,25 +196,18 @@ func addWorkspace(store *workspace.Store, args []string) error {
 }
 
 func addBrowserWorkspace(store *workspace.Store, selector string, all bool) error {
-	fmt.Println("Opening Slack sign-in in a browser. Finish signing in there; Slacker will continue automatically.")
+	fmt.Println("Welcome to Slacker.")
+	fmt.Println("1. Your default browser will open Slack's sign-in page.")
+	fmt.Println("2. Sign in and choose the workspace you want to use.")
+	fmt.Println("3. Leave this terminal open; setup continues automatically.")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	sessions, err := browserlogin.Login(ctx)
 	if err != nil {
 		return err
 	}
-	if len(sessions) > 1 && selector == "" && !all {
-		fmt.Println("The browser is signed in to multiple workspaces:")
-		for _, session := range sessions {
-			fmt.Printf("  %-24s %-18s %s\n", session.Name, session.Domain, session.TeamID)
-		}
-		return errors.New("choose one with `slacker workspace add <name|domain|team-id>`, or use --all")
-	}
 	added := 0
 	for _, session := range sessions {
-		if selector != "" && selector != session.Name && selector != session.Domain && selector != session.TeamID {
-			continue
-		}
 		client, err := slack.NewClient(slack.Session{Token: session.Token, Cookie: session.Cookie})
 		if err != nil {
 			return err
@@ -223,14 +216,21 @@ func addBrowserWorkspace(store *workspace.Store, selector string, all bool) erro
 		auth, err := client.Connect(validateCtx)
 		validateCancel()
 		if err != nil {
-			return fmt.Errorf("Slack signed in, but the browser session was rejected: %w", err)
+			continue
 		}
-		meta := workspace.Metadata{TeamID: session.TeamID, Name: session.Name, Domain: session.Domain, APIURL: client.APIURL()}
+		domain := ""
+		if parsed, parseErr := url.Parse(auth.URL); parseErr == nil {
+			domain = strings.TrimSuffix(parsed.Hostname(), ".slack.com")
+		}
+		meta := workspace.Metadata{TeamID: session.TeamID, Name: auth.Team, Domain: domain, APIURL: client.APIURL()}
 		if auth.TeamID != "" {
 			meta.TeamID = auth.TeamID
 		}
 		if auth.Team != "" {
 			meta.Name = auth.Team
+		}
+		if selector != "" && selector != meta.Name && selector != meta.Domain && selector != meta.TeamID {
+			continue
 		}
 		if err := store.Put(meta, workspace.Secret{Token: session.Token, Cookie: session.Cookie}, added == 0); err != nil {
 			return err
@@ -242,7 +242,10 @@ func addBrowserWorkspace(store *workspace.Store, selector string, all bool) erro
 		}
 	}
 	if added == 0 {
-		return fmt.Errorf("no browser workspace matched %q", selector)
+		if selector != "" {
+			return fmt.Errorf("no valid browser workspace matched %q", selector)
+		}
+		return errors.New("Slack signed in, but no valid browser workspace session was found")
 	}
 	return nil
 }

@@ -34,10 +34,12 @@ Run Slacker and it will open Slack's sign-in page in a browser when needed:
 slacker workspace add
 ```
 
-The browser window is a temporary profile controlled by Slacker. Complete any
-email, Google, Apple, or workspace SSO steps in that window. Slacker validates
-the resulting session before saving it to the operating system credential
-manager. Chrome or Chromium is required for this flow.
+Slacker uses the operating system's default browser and never downloads a
+browser. Complete any email, Google, Apple, or workspace SSO steps there and
+leave the terminal open. Slacker detects and validates the resulting session
+before saving it to the operating system credential manager. Session import
+currently supports Chromium-family browser profiles including Chrome, Arc,
+Edge, Brave, Chromium, and Vivaldi.
 
 If Slack Desktop contains more than one workspace, choose one explicitly:
 

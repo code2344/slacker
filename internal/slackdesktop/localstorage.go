@@ -92,6 +92,17 @@ func tokensFromLevelDB(dbDir string) (map[string]string, error) {
 	return out, nil
 }
 
+// TokensFromLevelDB extracts Slack tokens from a browser Local Storage
+// LevelDB without modifying or locking the live profile.
+func TokensFromLevelDB(dbDir string) (map[string]string, error) {
+	tmp, err := copyDirToTemp(dbDir)
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmp)
+	return tokensFromLevelDB(tmp)
+}
+
 // decodeLSValue decodes a Chromium localStorage value. Chromium prefixes the
 // stored bytes with a one-byte encoding tag: 0x00 → UTF-16LE, 0x01 → Latin-1
 // (used for all-ASCII values like our JSON). Unknown/absent tag: return as-is.
