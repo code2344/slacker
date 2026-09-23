@@ -152,7 +152,7 @@ func diagnoseWorkspace(args []string) error {
 	}
 	token := strings.TrimSpace(string(tokenBytes))
 	rawCookie := strings.TrimSpace(string(cookieBytes))
-	decodedCookie := normalizeCookie(rawCookie)
+	decodedCookie := decodeCookieForDiagnostics(rawCookie)
 	fmt.Printf("Token: prefix=%t length=%d fingerprint=%s\n", strings.HasPrefix(token, "xoxc-"), len(token), credentialFingerprint(token))
 	fmt.Printf("Cookie: prefix=%t length=%d percent_encoded=%t fingerprint=%s\n", strings.HasPrefix(rawCookie, "xoxd-"), len(rawCookie), strings.Contains(rawCookie, "%"), credentialFingerprint(rawCookie))
 
@@ -224,7 +224,7 @@ func linkWorkspace(store *workspace.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	cookie := normalizeCookie(strings.TrimSpace(string(cookieBytes)))
+	cookie := strings.TrimSpace(string(cookieBytes))
 	if cookie == "" {
 		return errors.New("the Slack d cookie is required")
 	}
@@ -259,7 +259,7 @@ func normalizeWorkspaceDomain(value string) string {
 	return value
 }
 
-func normalizeCookie(value string) string {
+func decodeCookieForDiagnostics(value string) string {
 	if decoded, err := url.PathUnescape(value); err == nil {
 		return decoded
 	}
@@ -431,7 +431,7 @@ func addManualWorkspace(store *workspace.Store, name, domain string) error {
 	if err != nil {
 		return err
 	}
-	secret := workspace.Secret{Token: strings.TrimSpace(string(tokenBytes)), Cookie: normalizeCookie(strings.TrimSpace(string(cookieBytes)))}
+	secret := workspace.Secret{Token: strings.TrimSpace(string(tokenBytes)), Cookie: strings.TrimSpace(string(cookieBytes))}
 	client, err := slack.NewClient(slack.Session{Token: secret.Token, Cookie: secret.Cookie})
 	if err != nil {
 		return err
