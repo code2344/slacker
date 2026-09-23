@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -70,7 +71,7 @@ func run(args []string) error {
 
 func runWorkspace(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: slacker workspace <add|link|list|current|use|remove|refresh>")
+		return errors.New("usage: slacker workspace <add|link|diagnose|list|current|use|remove|refresh>")
 	}
 	store := workspace.New(workspace.DefaultPath())
 	switch args[0] {
@@ -114,9 +115,84 @@ func runWorkspace(args []string) error {
 		return addWorkspace(store, args[1:])
 	case "link":
 		return linkWorkspace(store, args[1:])
+	case "diagnose":
+		return diagnoseWorkspace(args[1:])
 	default:
 		return fmt.Errorf("unknown workspace command %q", args[0])
 	}
+}
+
+func diagnoseWorkspace(args []string) error {
+	flags := flag.NewFlagSet("workspace diagnose", flag.ContinueOnError)
+	domain := flags.String("domain", "", "workspace URL or subdomain")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *domain == "" && flags.NArg() > 0 {
+		*domain = flags.Arg(0)
+	}
+	*domain = normalizeWorkspaceDomain(*domain)
+	if *domain == "" {
+		return errors.New("usage: slacker workspace diagnose --domain <workspace>")
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return errors.New("authentication diagnostics require an interactive terminal")
+	}
+	fmt.Print("xoxc token: ")
+	tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	if err != nil {
+		return err
+	}
+	fmt.Print("d/xoxd cookie: ")
+	cookieBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	if err != nil {
+		return err
+	}
+	token := strings.TrimSpace(string(tokenBytes))
+	rawCookie := strings.TrimSpace(string(cookieBytes))
+	decodedCookie := normalizeCookie(rawCookie)
+	fmt.Printf("Token: prefix=%t length=%d fingerprint=%s\n", strings.HasPrefix(token, "xoxc-"), len(token), credentialFingerprint(token))
+	fmt.Printf("Cookie: prefix=%t length=%d percent_encoded=%t fingerprint=%s\n", strings.HasPrefix(rawCookie, "xoxd-"), len(rawCookie), strings.Contains(rawCookie, "%"), credentialFingerprint(rawCookie))
+
+	type attempt struct{ label, cookie, apiURL string }
+	attempts := []attempt{
+		{"raw cookie via slack.com", rawCookie, "https://slack.com/api/"},
+		{"raw cookie via workspace host", rawCookie, "https://" + *domain + ".slack.com/api/"},
+	}
+	if decodedCookie != rawCookie {
+		attempts = append(attempts,
+			attempt{"decoded cookie via slack.com", decodedCookie, "https://slack.com/api/"},
+			attempt{"decoded cookie via workspace host", decodedCookie, "https://" + *domain + ".slack.com/api/"},
+		)
+	}
+	valid := false
+	for _, current := range attempts {
+		client, err := slack.NewClient(slack.Session{Token: token, Cookie: current.cookie, APIURL: current.apiURL}, slack.WithRetries(0))
+		if err != nil {
+			fmt.Printf("FAIL %-36s setup=%v\n", current.label, err)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		auth, err := client.AuthTest(ctx)
+		cancel()
+		if err != nil {
+			fmt.Printf("FAIL %-36s error=%v cookie_length=%d cookie_fingerprint=%s\n", current.label, err, len(current.cookie), credentialFingerprint(current.cookie))
+			continue
+		}
+		fmt.Printf("PASS %-36s team=%q team_id=%s user=%q user_id=%s\n", current.label, auth.Team, auth.TeamID, auth.User, auth.UserID)
+		valid = true
+	}
+	if !valid {
+		return errors.New("all authentication variants failed; compare the fingerprints to ensure each value was copied in full and from the same Firefox profile")
+	}
+	return nil
+}
+
+func credentialFingerprint(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:6])
 }
 
 func linkWorkspace(store *workspace.Store, args []string) error {
@@ -521,6 +597,7 @@ Usage:
     --desktop                     Import an existing Slack Desktop session
     --manual                      Enter both xoxc token and d cookie
   slacker workspace link [url]    Link using a browser d cookie
+  slacker workspace diagnose     Test session variants without saving them
   slacker workspace list          List configured workspaces
   slacker workspace use <name>    Change the active workspace
   slacker workspace refresh       Refresh the active browser token

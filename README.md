@@ -71,6 +71,17 @@ explicit fallback accepts both values:
 slacker workspace add --manual --domain example
 ```
 
+To troubleshoot `invalid_auth` without saving or printing either credential:
+
+```sh
+slacker workspace diagnose --domain example
+```
+
+The diagnostic checks raw and URL-decoded cookie forms against both Slack's
+global API host and the workspace host. It reports lengths, short SHA-256
+fingerprints, and Slack's response for each attempt, so truncated or mismatched
+values can be identified without exposing them again.
+
 Workspace commands:
 
 ```sh
