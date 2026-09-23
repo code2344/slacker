@@ -59,24 +59,11 @@ func NewClient(session Session, opts ...Option) (*Client, error) {
 
 func (c *Client) APIURL() string { return c.session.APIURL }
 
-// Connect validates the browser session and adopts the workspace-specific API
-// host returned by Slack. Enterprise Grid requests rely on this routing.
+// Connect validates the browser session. API methods remain on slack.com:
+// auth.test can return an Enterprise Grid navigation URL that accepts the
+// initial request but is not a stable API base for subsequent launches.
 func (c *Client) Connect(ctx context.Context) (Auth, error) {
-	auth, err := c.AuthTest(ctx)
-	if err != nil {
-		return Auth{}, err
-	}
-	if auth.URL != "" {
-		workspaceURL, err := url.Parse(auth.URL)
-		if err != nil {
-			return Auth{}, fmt.Errorf("parse workspace URL: %w", err)
-		}
-		workspaceURL.Path = "/api/"
-		workspaceURL.RawQuery = ""
-		workspaceURL.Fragment = ""
-		c.session.APIURL = workspaceURL.String()
-	}
-	return auth, nil
+	return c.AuthTest(ctx)
 }
 
 func (c *Client) Call(ctx context.Context, method string, params url.Values, out any) error {

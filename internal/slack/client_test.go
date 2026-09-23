@@ -72,6 +72,27 @@ func TestCallReturnsAPIError(t *testing.T) {
 	}
 }
 
+func TestConnectDoesNotAdoptEnterpriseNavigationURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"ok":true,"team_id":"T1","url":"https://example.enterprise.slack.com/"}`)
+	}))
+	defer server.Close()
+	apiURL := server.URL + "/api/"
+	client, err := NewClient(
+		Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: apiURL},
+		WithHTTPClient(server.Client()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if client.APIURL() != apiURL {
+		t.Fatalf("API URL changed to %q", client.APIURL())
+	}
+}
+
 func TestBrowserTransportOnlyDecoratesSlackHosts(t *testing.T) {
 	inner := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		body := io.NopCloser(strings.NewReader(`{"ok":true}`))

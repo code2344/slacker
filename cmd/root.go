@@ -125,33 +125,44 @@ func runWorkspace(args []string) error {
 func diagnoseWorkspace(args []string) error {
 	flags := flag.NewFlagSet("workspace diagnose", flag.ContinueOnError)
 	domain := flags.String("domain", "", "workspace URL or subdomain")
+	saved := flags.Bool("saved", false, "diagnose the active saved session")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *domain == "" && flags.NArg() > 0 {
 		*domain = flags.Arg(0)
 	}
-	*domain = normalizeWorkspaceDomain(*domain)
-	if *domain == "" {
-		return errors.New("usage: slacker workspace diagnose --domain <workspace>")
+	var token, rawCookie string
+	if *saved {
+		meta, secret, err := workspace.New(workspace.DefaultPath()).Active()
+		if err != nil {
+			return err
+		}
+		*domain, token, rawCookie = meta.Domain, secret.Token, secret.Cookie
+		fmt.Printf("Saved workspace: name=%q id=%s domain=%s stored_api=%s\n", meta.Name, meta.TeamID, meta.Domain, meta.APIURL)
+	} else {
+		*domain = normalizeWorkspaceDomain(*domain)
+		if *domain == "" {
+			return errors.New("usage: slacker workspace diagnose --domain <workspace> or --saved")
+		}
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			return errors.New("authentication diagnostics require an interactive terminal")
+		}
+		fmt.Print("xoxc token: ")
+		tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return err
+		}
+		fmt.Print("d/xoxd cookie: ")
+		cookieBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return err
+		}
+		token = strings.TrimSpace(string(tokenBytes))
+		rawCookie = strings.TrimSpace(string(cookieBytes))
 	}
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		return errors.New("authentication diagnostics require an interactive terminal")
-	}
-	fmt.Print("xoxc token: ")
-	tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
-	if err != nil {
-		return err
-	}
-	fmt.Print("d/xoxd cookie: ")
-	cookieBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Println()
-	if err != nil {
-		return err
-	}
-	token := strings.TrimSpace(string(tokenBytes))
-	rawCookie := strings.TrimSpace(string(cookieBytes))
 	decodedCookie := decodeCookieForDiagnostics(rawCookie)
 	fmt.Printf("Token: prefix=%t length=%d fingerprint=%s\n", strings.HasPrefix(token, "xoxc-"), len(token), credentialFingerprint(token))
 	fmt.Printf("Cookie: prefix=%t length=%d percent_encoded=%t fingerprint=%s\n", strings.HasPrefix(rawCookie, "xoxd-"), len(rawCookie), strings.Contains(rawCookie, "%"), credentialFingerprint(rawCookie))
@@ -418,7 +429,7 @@ func addManualWorkspace(store *workspace.Store, name, domain string) error {
 		return errors.New("manual credential entry requires an interactive terminal")
 	}
 	fmt.Println("In Firefox on app.slack.com, open Developer Tools → Console and run:")
-	fmt.Println(`Object.values(JSON.parse(localStorage.localConfig_v2).teams).forEach(t => console.log(t.name, "=>", t.token))`)
+	fmt.Println(`Object.entries(JSON.parse(localStorage.localConfig_v2).teams).filter(([id]) => id.startsWith("T")).forEach(([id, t]) => console.log(t.name, id, "=>", t.token))`)
 	fmt.Print("xoxc token: ")
 	tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
@@ -489,7 +500,10 @@ func activeClient() (workspace.Metadata, *slack.Client, error) {
 	if err != nil {
 		return workspace.Metadata{}, nil, err
 	}
-	client, err := slack.NewClient(slack.Session{Token: secret.Token, Cookie: secret.Cookie, CookieS: secret.CookieS, APIURL: meta.APIURL})
+	// Always begin on Slack's global API host. Older Slacker builds persisted
+	// auth.test's Enterprise Grid navigation URL as an API route, which could
+	// validate once during setup and fail on the next launch.
+	client, err := slack.NewClient(slack.Session{Token: secret.Token, Cookie: secret.Cookie, CookieS: secret.CookieS})
 	return meta, client, err
 }
 
@@ -597,7 +611,8 @@ Usage:
     --desktop                     Import an existing Slack Desktop session
     --manual                      Enter both xoxc token and d cookie
   slacker workspace link [url]    Link using a browser d cookie
-  slacker workspace diagnose     Test session variants without saving them
+  slacker workspace diagnose     Test entered credentials without saving them
+    --saved                       Diagnose the active saved session
   slacker workspace list          List configured workspaces
   slacker workspace use <name>    Change the active workspace
   slacker workspace refresh       Refresh the active browser token

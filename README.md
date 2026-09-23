@@ -75,6 +75,7 @@ To troubleshoot `invalid_auth` without saving or printing either credential:
 
 ```sh
 slacker workspace diagnose --domain example
+slacker workspace diagnose --saved
 ```
 
 The diagnostic checks raw and URL-decoded cookie forms against both Slack's
