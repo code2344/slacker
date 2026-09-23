@@ -443,6 +443,8 @@ func addManualWorkspace(store *workspace.Store, name, domain string) error {
 		return err
 	}
 	secret := workspace.Secret{Token: strings.TrimSpace(string(tokenBytes)), Cookie: strings.TrimSpace(string(cookieBytes))}
+	fmt.Printf("Credential check: token_length=%d token_fingerprint=%s cookie_length=%d cookie_fingerprint=%s\n",
+		len(secret.Token), credentialFingerprint(secret.Token), len(secret.Cookie), credentialFingerprint(secret.Cookie))
 	client, err := slack.NewClient(slack.Session{Token: secret.Token, Cookie: secret.Cookie})
 	if err != nil {
 		return err
@@ -453,12 +455,35 @@ func addManualWorkspace(store *workspace.Store, name, domain string) error {
 	if err != nil {
 		return err
 	}
+	fmt.Printf("First validation: team=%q team_id=%s user=%q user_id=%s\n", auth.Team, auth.TeamID, auth.User, auth.UserID)
+	secondAuth, err := client.AuthTest(ctx)
+	if err != nil {
+		return fmt.Errorf("session passed once but failed immediate revalidation before saving: %w", err)
+	}
+	fmt.Printf("Second validation: team=%q team_id=%s user=%q user_id=%s\n", secondAuth.Team, secondAuth.TeamID, secondAuth.User, secondAuth.UserID)
 	meta := workspace.Metadata{TeamID: auth.TeamID, Name: auth.Team, Domain: domain, APIURL: client.APIURL()}
 	if meta.Name == "" {
 		meta.Name = name
 	}
 	if err := store.Put(meta, secret, true); err != nil {
 		return err
+	}
+	readback, err := store.Secret(meta.TeamID)
+	if err != nil {
+		return fmt.Errorf("credentials were saved but could not be read back: %w", err)
+	}
+	fmt.Printf("Keyring read-back: token_match=%t cookie_match=%t token_fingerprint=%s cookie_fingerprint=%s\n",
+		readback.Token == secret.Token, readback.Cookie == secret.Cookie,
+		credentialFingerprint(readback.Token), credentialFingerprint(readback.Cookie))
+	if readback.Token != secret.Token || readback.Cookie != secret.Cookie {
+		return errors.New("the operating-system keyring changed the credentials during persistence")
+	}
+	readbackClient, err := slack.NewClient(slack.Session{Token: readback.Token, Cookie: readback.Cookie})
+	if err != nil {
+		return err
+	}
+	if _, err := readbackClient.AuthTest(ctx); err != nil {
+		return fmt.Errorf("session passed before saving but failed immediately after an exact keyring read-back: %w", err)
 	}
 	fmt.Printf("Added %s (%s)\n", meta.Name, meta.TeamID)
 	return nil
