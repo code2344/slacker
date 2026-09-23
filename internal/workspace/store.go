@@ -14,6 +14,8 @@ import (
 
 const metadataFile = "workspaces.json"
 
+var ErrNoActiveWorkspace = errors.New("no active workspace")
+
 type Metadata struct {
 	TeamID string `json:"team_id"`
 	Name   string `json:"name"`
@@ -121,7 +123,7 @@ func (s *Store) Active() (Metadata, Secret, error) {
 	}
 	meta, ok := state.Workspaces[state.Active]
 	if !ok {
-		return Metadata{}, Secret{}, errors.New("no active workspace; run `slacker workspace add`")
+		return Metadata{}, Secret{}, fmt.Errorf("%w; run `slacker workspace add`", ErrNoActiveWorkspace)
 	}
 	secret, err := s.Secret(meta.TeamID)
 	return meta, secret, err

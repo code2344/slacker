@@ -7,6 +7,7 @@ require (
 	github.com/ayn2op/tview v0.0.0-20260921222159-2332063ded2f
 	github.com/billgraziano/dpapi v0.5.0
 	github.com/gdamore/tcell/v3 v3.5.0
+	github.com/go-rod/rod v0.116.2
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/mattn/go-shellwords v1.0.15
 	github.com/syndtr/goleveldb v1.0.0
@@ -33,6 +34,11 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sahilm/fuzzy v0.1.3 // indirect
+	github.com/ysmood/fetchup v0.2.3 // indirect
+	github.com/ysmood/goob v0.4.0 // indirect
+	github.com/ysmood/got v0.40.0 // indirect
+	github.com/ysmood/gson v0.7.3 // indirect
+	github.com/ysmood/leakless v0.9.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/tools v0.50.0 // indirect
 	modernc.org/libc v1.75.7 // indirect

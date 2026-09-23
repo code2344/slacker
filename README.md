@@ -2,12 +2,13 @@
 
 Slacker is a keyboard-driven Slack terminal client built from Discordo's TUI
 foundations. It authenticates as your existing Slack user through the same
-browser session used by Slack Desktop; it does not install a bot or require a
-Slack Marketplace app.
+browser session used by Slack's web client; it does not install a bot or
+require a Slack Marketplace app.
 
 The project is in an early backend-replacement phase. The current build can:
 
-- discover signed-in Slack Desktop workspaces on macOS, Linux, and Windows;
+- open an isolated browser window for Slack's normal interactive sign-in;
+- optionally discover signed-in Slack Desktop workspaces on macOS, Linux, and Windows;
 - import the bound browser token and session cookie into the OS keyring;
 - validate the session and discover Enterprise Grid API routing;
 - call Slack's user and internal client APIs with rate-limit handling;
@@ -27,11 +28,16 @@ go build .
 
 ## Set up a workspace
 
-Sign in through Slack Desktop, then run:
+Run Slacker and it will open Slack's sign-in page in a browser when needed:
 
 ```sh
 slacker workspace add
 ```
+
+The browser window is a temporary profile controlled by Slacker. Complete any
+email, Google, Apple, or workspace SSO steps in that window. Slacker validates
+the resulting session before saving it to the operating system credential
+manager. Chrome or Chromium is required for this flow.
 
 If Slack Desktop contains more than one workspace, choose one explicitly:
 
@@ -39,6 +45,12 @@ If Slack Desktop contains more than one workspace, choose one explicitly:
 slacker workspace add example
 slacker workspace add T0123456789
 slacker workspace add --all
+```
+
+Importing Slack Desktop remains available as a fallback:
+
+```sh
+slacker workspace add --desktop
 ```
 
 Workspace commands:

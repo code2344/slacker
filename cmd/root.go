@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ayn2op/tview"
+	"github.com/code2344/slacker/internal/browserlogin"
 	"github.com/code2344/slacker/internal/config"
 	"github.com/code2344/slacker/internal/logger"
 	"github.com/code2344/slacker/internal/slack"
@@ -120,6 +121,7 @@ func addWorkspace(store *workspace.Store, args []string) error {
 	flags := flag.NewFlagSet("workspace add", flag.ContinueOnError)
 	all := flags.Bool("all", false, "import every Slack Desktop workspace")
 	manual := flags.Bool("manual", false, "enter a browser session manually")
+	desktop := flags.Bool("desktop", false, "import an existing Slack Desktop session")
 	domain := flags.String("domain", "", "workspace subdomain for manual entry")
 	name := flags.String("name", "", "workspace name for manual entry")
 	if err := flags.Parse(args); err != nil {
@@ -131,6 +133,9 @@ func addWorkspace(store *workspace.Store, args []string) error {
 	}
 	if *manual {
 		return addManualWorkspace(store, *name, *domain)
+	}
+	if !*desktop {
+		return addBrowserWorkspace(store, selector, *all)
 	}
 	candidates, err := slackdesktop.Discover()
 	if err != nil {
@@ -186,6 +191,58 @@ func addWorkspace(store *workspace.Store, args []string) error {
 	}
 	if added == 0 {
 		return fmt.Errorf("no Slack Desktop workspace matched %q", selector)
+	}
+	return nil
+}
+
+func addBrowserWorkspace(store *workspace.Store, selector string, all bool) error {
+	fmt.Println("Opening Slack sign-in in a browser. Finish signing in there; Slacker will continue automatically.")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	sessions, err := browserlogin.Login(ctx)
+	if err != nil {
+		return err
+	}
+	if len(sessions) > 1 && selector == "" && !all {
+		fmt.Println("The browser is signed in to multiple workspaces:")
+		for _, session := range sessions {
+			fmt.Printf("  %-24s %-18s %s\n", session.Name, session.Domain, session.TeamID)
+		}
+		return errors.New("choose one with `slacker workspace add <name|domain|team-id>`, or use --all")
+	}
+	added := 0
+	for _, session := range sessions {
+		if selector != "" && selector != session.Name && selector != session.Domain && selector != session.TeamID {
+			continue
+		}
+		client, err := slack.NewClient(slack.Session{Token: session.Token, Cookie: session.Cookie})
+		if err != nil {
+			return err
+		}
+		validateCtx, validateCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		auth, err := client.Connect(validateCtx)
+		validateCancel()
+		if err != nil {
+			return fmt.Errorf("Slack signed in, but the browser session was rejected: %w", err)
+		}
+		meta := workspace.Metadata{TeamID: session.TeamID, Name: session.Name, Domain: session.Domain, APIURL: client.APIURL()}
+		if auth.TeamID != "" {
+			meta.TeamID = auth.TeamID
+		}
+		if auth.Team != "" {
+			meta.Name = auth.Team
+		}
+		if err := store.Put(meta, workspace.Secret{Token: session.Token, Cookie: session.Cookie}, added == 0); err != nil {
+			return err
+		}
+		fmt.Printf("Added %s (%s)\n", meta.Name, meta.TeamID)
+		added++
+		if !all {
+			break
+		}
+	}
+	if added == 0 {
+		return fmt.Errorf("no browser workspace matched %q", selector)
 	}
 	return nil
 }
@@ -291,7 +348,7 @@ func runDoctor() error {
 	defer cancel()
 	auth, err := client.Connect(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("workspace %s has an invalid session; run `slacker workspace add %s` to sign in again: %w", meta.Name, meta.TeamID, err)
 	}
 	fmt.Printf("Workspace: %s (%s)\nUser: %s (%s)\nAPI: %s\nSession: valid\n", meta.Name, auth.TeamID, auth.User, auth.UserID, client.APIURL())
 	return nil
@@ -327,13 +384,37 @@ func runAPI(args []string) error {
 func runTUI(cfg *config.Config) error {
 	meta, client, err := activeClient()
 	if err != nil {
-		return err
+		if !errors.Is(err, workspace.ErrNoActiveWorkspace) {
+			return err
+		}
+		if err := addBrowserWorkspace(workspace.New(workspace.DefaultPath()), "", false); err != nil {
+			return err
+		}
+		meta, client, err = activeClient()
+		if err != nil {
+			return err
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	if _, err := client.Connect(ctx); err != nil {
-		return err
+	_, connectErr := client.Connect(ctx)
+	cancel()
+	if connectErr != nil {
+		fmt.Printf("The saved session for %s is no longer valid.\n", meta.Name)
+		if err := addBrowserWorkspace(workspace.New(workspace.DefaultPath()), meta.TeamID, false); err != nil {
+			return fmt.Errorf("sign in again after %v: %w", connectErr, err)
+		}
+		meta, client, err = activeClient()
+		if err != nil {
+			return err
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		if _, err := client.Connect(ctx); err != nil {
+			return err
+		}
 	}
+	ctx, cancel = context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	conversations, _, err := client.ListConversations(ctx, "", 200)
 	if err != nil {
 		return err
@@ -358,7 +439,8 @@ func printUsage() {
 
 Usage:
   slacker                         Open the active workspace
-  slacker workspace add [name]    Import a Slack Desktop session
+  slacker workspace add [name]    Sign in with Slack in a browser
+	  --desktop                     Import an existing Slack Desktop session
   slacker workspace list          List configured workspaces
   slacker workspace use <name>    Change the active workspace
 	  slacker workspace refresh       Refresh the active browser token
