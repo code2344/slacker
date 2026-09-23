@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	uiroot "github.com/code2344/slacker/internal/ui/root"
 	"github.com/code2344/slacker/internal/workspace"
 	"github.com/gdamore/tcell/v3"
+	"golang.org/x/term"
 )
 
 func Run() error { return run(os.Args[1:]) }
@@ -67,7 +69,7 @@ func run(args []string) error {
 
 func runWorkspace(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: slacker workspace <add|list|current|use|remove>")
+		return errors.New("usage: slacker workspace <add|list|current|use|remove|refresh>")
 	}
 	store := workspace.New(workspace.DefaultPath())
 	switch args[0] {
@@ -105,6 +107,8 @@ func runWorkspace(args []string) error {
 			return errors.New("usage: slacker workspace remove <name|domain|team-id>")
 		}
 		return store.Remove(args[1])
+	case "refresh":
+		return refreshWorkspace(store)
 	case "add":
 		return addWorkspace(store, args[1:])
 	default:
@@ -115,12 +119,18 @@ func runWorkspace(args []string) error {
 func addWorkspace(store *workspace.Store, args []string) error {
 	flags := flag.NewFlagSet("workspace add", flag.ContinueOnError)
 	all := flags.Bool("all", false, "import every Slack Desktop workspace")
+	manual := flags.Bool("manual", false, "enter a browser session manually")
+	domain := flags.String("domain", "", "workspace subdomain for manual entry")
+	name := flags.String("name", "", "workspace name for manual entry")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	selector := ""
 	if flags.NArg() > 0 {
 		selector = flags.Arg(0)
+	}
+	if *manual {
+		return addManualWorkspace(store, *name, *domain)
 	}
 	candidates, err := slackdesktop.Discover()
 	if err != nil {
@@ -145,6 +155,15 @@ func addWorkspace(store *workspace.Store, args []string) error {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		auth, err := client.Connect(ctx)
+		if err != nil {
+			if refreshed, mintErr := slack.MintToken(ctx, ws.Domain, candidate.Cookie); mintErr == nil {
+				candidate.Token = refreshed
+				client, err = slack.NewClient(slack.Session{Token: candidate.Token, Cookie: candidate.Cookie})
+				if err == nil {
+					auth, err = client.Connect(ctx)
+				}
+			}
+		}
 		cancel()
 		if err != nil {
 			return fmt.Errorf("validate %s: %w", ws.Name, err)
@@ -168,6 +187,89 @@ func addWorkspace(store *workspace.Store, args []string) error {
 	if added == 0 {
 		return fmt.Errorf("no Slack Desktop workspace matched %q", selector)
 	}
+	return nil
+}
+
+func addManualWorkspace(store *workspace.Store, name, domain string) error {
+	reader := bufio.NewReader(os.Stdin)
+	if name == "" {
+		fmt.Print("Workspace name: ")
+		name, _ = reader.ReadString('\n')
+		name = strings.TrimSpace(name)
+	}
+	if domain == "" {
+		fmt.Print("Workspace subdomain: ")
+		domain, _ = reader.ReadString('\n')
+		domain = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(domain, "https://"), ".slack.com"))
+	}
+	if name == "" || domain == "" {
+		return errors.New("workspace name and domain are required")
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return errors.New("manual credential entry requires an interactive terminal")
+	}
+	fmt.Print("xoxc token: ")
+	tokenBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	if err != nil {
+		return err
+	}
+	fmt.Print("d/xoxd cookie: ")
+	cookieBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	if err != nil {
+		return err
+	}
+	secret := workspace.Secret{Token: strings.TrimSpace(string(tokenBytes)), Cookie: strings.TrimSpace(string(cookieBytes))}
+	client, err := slack.NewClient(slack.Session{Token: secret.Token, Cookie: secret.Cookie})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	auth, err := client.Connect(ctx)
+	if err != nil {
+		return err
+	}
+	meta := workspace.Metadata{TeamID: auth.TeamID, Name: auth.Team, Domain: domain, APIURL: client.APIURL()}
+	if meta.Name == "" {
+		meta.Name = name
+	}
+	if err := store.Put(meta, secret, true); err != nil {
+		return err
+	}
+	fmt.Printf("Added %s (%s)\n", meta.Name, meta.TeamID)
+	return nil
+}
+
+func refreshWorkspace(store *workspace.Store) error {
+	meta, secret, err := store.Active()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	token, err := slack.MintToken(ctx, meta.Domain, secret.Cookie)
+	if err != nil {
+		return err
+	}
+	secret.Token = token
+	client, err := slack.NewClient(slack.Session{Token: token, Cookie: secret.Cookie, CookieS: secret.CookieS})
+	if err != nil {
+		return err
+	}
+	auth, err := client.Connect(ctx)
+	if err != nil {
+		return err
+	}
+	meta.APIURL = client.APIURL()
+	if auth.Team != "" {
+		meta.Name = auth.Team
+	}
+	if err := store.Put(meta, secret, true); err != nil {
+		return err
+	}
+	fmt.Printf("Refreshed %s (%s)\n", meta.Name, meta.TeamID)
 	return nil
 }
 
@@ -259,6 +361,7 @@ Usage:
   slacker workspace add [name]    Import a Slack Desktop session
   slacker workspace list          List configured workspaces
   slacker workspace use <name>    Change the active workspace
+	  slacker workspace refresh       Refresh the active browser token
   slacker doctor                  Validate the active session
   slacker api <method> [k=v ...]  Call a Slack client API method
   slacker version                 Print the version`)
