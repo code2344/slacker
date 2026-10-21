@@ -4,7 +4,11 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -48,6 +52,7 @@ type Model struct {
 	conversations      map[string]slack.Conversation
 	activeConversation string
 	activeThread       string
+	searchMode         bool
 	selfUserID         string
 	editing            *messageReference
 	editingInThread    bool
@@ -86,6 +91,8 @@ type messageProfileReference struct{ messageReference }
 type threadReference struct{ messageReference }
 type threadBackReference struct{ conversation slack.Conversation }
 type inspectorCloseReference struct{}
+type fileReference struct{ file slack.File }
+type searchMessageReference struct{ match slack.MessageSearchMatch }
 type threadLoadedMsg struct {
 	conversation slack.Conversation
 	timestamp    string
@@ -106,6 +113,18 @@ type profileDetailsLoadedMsg struct {
 	userID   string
 	presence slack.UserPresence
 	dnd      slack.DNDInfo
+}
+type searchLoadedMsg struct {
+	query        string
+	messages     []slack.MessageSearchMatch
+	messageTotal int
+	files        []slack.File
+	fileTotal    int
+	err          error
+}
+type fileOpenedMsg struct {
+	path string
+	err  error
 }
 
 type realtimeConnectedMsg struct {
@@ -300,6 +319,14 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		if msg.Key() == tcell.KeyCtrlC {
 			return tview.Quit()
 		}
+		if msg.Key() == tcell.KeyEscape && m.searchMode {
+			m.searchMode = false
+			m.composer.SetText("", false)
+			if conversation, ok := m.conversations[m.activeConversation]; ok {
+				m.composer.SetTitle("Message " + conversationTitle(conversation))
+			}
+			return nil
+		}
 		if msg.Key() == tcell.KeyEscape && m.editing != nil {
 			m.cancelEdit()
 			return nil
@@ -340,6 +367,13 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 				return nil
 			}
 		}
+		if msg.Str() == "/" && m.main.Focused() == 1 && m.right.Focused() == 0 {
+			m.searchMode = true
+			m.composer.SetText("", false)
+			m.composer.SetTitle("Search messages and files — Enter to search · Esc to cancel")
+			m.right.SetFocus(1)
+			return nil
+		}
 		if msg.Key() == tcell.KeyEnter && m.activeThread != "" && m.main.Focused() == 2 && m.inspector.Focused() == 1 {
 			text := strings.TrimSpace(m.threadComposer.Text())
 			if text != "" {
@@ -354,6 +388,12 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		if msg.Key() == tcell.KeyEnter && m.activeConversation != "" && m.main.Focused() == 1 && m.right.Focused() == 1 {
 			text := strings.TrimSpace(m.composer.Text())
 			if text != "" {
+				if m.searchMode {
+					m.searchMode = false
+					m.composer.SetDisabled(true)
+					m.composer.SetTitle("Searching…")
+					return m.search(text)
+				}
 				conversation := m.conversations[m.activeConversation]
 				m.composer.SetDisabled(true)
 				if m.editing != nil {
@@ -393,6 +433,18 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		case inspectorCloseReference:
 			m.closeInspector()
 			return nil
+		case fileReference:
+			m.messages.SetTitle("Opening " + fileName(reference.file) + "…")
+			return m.downloadAndOpen(reference.file)
+		case searchMessageReference:
+			conversation := reference.match.Channel
+			if known, ok := m.conversations[conversation.ID]; ok {
+				conversation = known
+			}
+			m.activeConversation = conversation.ID
+			m.closeInspector()
+			m.setMessageNotice("Loading " + conversationTitle(conversation) + "…")
+			return m.loadHistory(conversation)
 		}
 	case historyLoadedMsg:
 		if msg.conversation.ID != m.activeConversation {
@@ -495,6 +547,21 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.presences[msg.userID] = msg.presence
 		m.dnd[msg.userID] = msg.dnd
 		return m.showProfile(msg.userID)
+	case searchLoadedMsg:
+		m.composer.SetDisabled(false)
+		m.composer.SetText("", false)
+		if msg.err != nil {
+			m.composer.SetTitle("Search failed: " + msg.err.Error())
+			break
+		}
+		m.showSearchResults(msg)
+		m.composer.SetTitle("Search again with /")
+	case fileOpenedMsg:
+		if msg.err != nil {
+			m.messages.SetTitle("File failed: " + msg.err.Error())
+		} else {
+			m.messages.SetTitle("Opened " + msg.path)
+		}
 	case realtimeConnectedMsg:
 		if msg.err != nil {
 			return m.reconnectRealtime()
@@ -747,7 +814,11 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 			if name == "" {
 				name = file.Name
 			}
-			root.AddChild(tree.NewNode("  📎 " + name).SetSelectable(false))
+			label := "file"
+			if strings.HasPrefix(file.Mimetype, "image/") {
+				label = "image"
+			}
+			root.AddChild(tree.NewNode("  [" + label + "] " + name + " — open").SetReference(fileReference{file: file}))
 		}
 		if len(message.Reactions) > 0 {
 			root.AddChild(tree.NewNode("  " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
@@ -813,6 +884,13 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 			node = tree.NewNode(line).SetReference(messageProfileReference{messageReference: reference}).SetExpanded(true)
 		}
 		root.AddChild(node)
+		for _, file := range message.Files {
+			kind := "file"
+			if strings.HasPrefix(file.Mimetype, "image/") {
+				kind = "image"
+			}
+			root.AddChild(tree.NewNode("  [" + kind + "] " + fileName(file) + " — open").SetReference(fileReference{file: file}))
+		}
 		if len(message.Reactions) > 0 {
 			root.AddChild(tree.NewNode("  " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
 		}
@@ -911,6 +989,12 @@ func (m *Model) showProfile(userID string) tview.Cmd {
 		root.AddChild(tree.NewNode("@" + handle).SetSelectable(false))
 	} else if user.Name != "" && user.Name != realName {
 		root.AddChild(tree.NewNode("@" + user.Name).SetSelectable(false))
+	}
+	for _, conversation := range m.conversations {
+		if conversation.IsIM && conversation.User == userID {
+			root.AddChild(tree.NewNode("Message @" + handle).SetReference(conversation.ID))
+			break
+		}
 	}
 	if user.Profile.Title != "" || user.Profile.Pronouns != "" {
 		summary := user.Profile.Title
@@ -1075,6 +1159,150 @@ func (m *Model) loadUser(userID string) tview.Cmd {
 		user, err := m.client.UserInfo(ctx, userID)
 		return userLoadedMsg{userID: userID, user: user, err: err}
 	}
+}
+
+func (m *Model) search(query string) tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		var messages []slack.MessageSearchMatch
+		var files []slack.File
+		var messageTotal, fileTotal int
+		var messageErr, fileErr error
+		var group sync.WaitGroup
+		group.Add(2)
+		go func() {
+			defer group.Done()
+			messages, messageTotal, messageErr = m.client.SearchMessages(ctx, query)
+		}()
+		go func() {
+			defer group.Done()
+			files, fileTotal, fileErr = m.client.SearchFiles(ctx, query)
+		}()
+		group.Wait()
+		var err error
+		if messageErr != nil && fileErr != nil {
+			err = fmt.Errorf("messages: %v; files: %v", messageErr, fileErr)
+		}
+		return searchLoadedMsg{query: query, messages: messages, messageTotal: messageTotal, files: files, fileTotal: fileTotal, err: err}
+	}
+}
+
+func (m *Model) showSearchResults(result searchLoadedMsg) {
+	root := tree.NewNode("")
+	root.AddChild(tree.NewNode(fmt.Sprintf("Messages  %d matches", result.messageTotal)).SetSelectable(false))
+	for _, match := range result.messages {
+		author := match.Username
+		if user, ok := m.users[match.User]; ok {
+			author = displayName(user)
+		}
+		if author == "" {
+			author = match.User
+		}
+		channel := match.Channel.Name
+		if channel == "" {
+			channel = match.Channel.ID
+		}
+		line := fmt.Sprintf("#%s  @%s  %s  %s", channel, author, formatRelativeTimestamp(match.Timestamp, time.Now()), strings.ReplaceAll(m.renderSlackText(match.Text), "\n", " ↵ "))
+		root.AddChild(tree.NewNode(line).SetReference(searchMessageReference{match: match}))
+	}
+	root.AddChild(tree.NewNode("").SetSelectable(false))
+	root.AddChild(tree.NewNode(fmt.Sprintf("Files  %d matches", result.fileTotal)).SetSelectable(false))
+	for _, file := range result.files {
+		kind := file.PrettyType
+		if kind == "" {
+			kind = file.Mimetype
+		}
+		root.AddChild(tree.NewNode(fmt.Sprintf("[%s] %s  %s — open", kind, fileName(file), formatBytes(file.Size))).SetReference(fileReference{file: file}))
+	}
+	if len(result.messages) == 0 && len(result.files) == 0 {
+		root.AddChild(tree.NewNode("No results.").SetSelectable(false))
+	}
+	m.messages.SetRoot(root).SetTopLevel(1).SetTitle("Search: " + result.query)
+	m.right.SetFocus(0)
+}
+
+func (m *Model) downloadAndOpen(file slack.File) tview.Cmd {
+	return func() tview.Msg {
+		url := file.URLPrivateDownload
+		if url == "" {
+			url = file.URLPrivate
+		}
+		if url == "" {
+			return fileOpenedMsg{err: fmt.Errorf("Slack returned no downloadable URL")}
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fileOpenedMsg{err: err}
+		}
+		directory := filepath.Join(home, "Downloads", "Slacker")
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			return fileOpenedMsg{err: err}
+		}
+		name := filepath.Base(fileName(file))
+		if name == "." || name == string(filepath.Separator) || name == "" {
+			name = file.ID
+		}
+		target := filepath.Join(directory, name)
+		if _, err := os.Stat(target); err == nil {
+			target = filepath.Join(directory, file.ID+"-"+name)
+		}
+		temporary, err := os.CreateTemp(directory, ".slacker-download-*")
+		if err != nil {
+			return fileOpenedMsg{err: err}
+		}
+		temporaryName := temporary.Name()
+		defer os.Remove(temporaryName)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := m.client.Download(ctx, url, temporary); err != nil {
+			temporary.Close()
+			return fileOpenedMsg{err: err}
+		}
+		if err := temporary.Close(); err != nil {
+			return fileOpenedMsg{err: err}
+		}
+		if err := os.Rename(temporaryName, target); err != nil {
+			return fileOpenedMsg{err: err}
+		}
+		if err := openLocalFile(target); err != nil {
+			return fileOpenedMsg{path: target, err: err}
+		}
+		return fileOpenedMsg{path: target}
+	}
+}
+
+func fileName(file slack.File) string {
+	if file.Title != "" {
+		return file.Title
+	}
+	if file.Name != "" {
+		return file.Name
+	}
+	return file.ID
+}
+
+func formatBytes(size int64) string {
+	if size < 1024 {
+		return fmt.Sprintf("%d B", size)
+	}
+	if size < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(size)/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
+}
+
+func openLocalFile(path string) error {
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		command = exec.Command("open", path)
+	case "windows":
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
+	default:
+		command = exec.Command("xdg-open", path)
+	}
+	return command.Start()
 }
 
 func (m *Model) loadProfileDetails(userID string) tview.Cmd {

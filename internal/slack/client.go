@@ -60,6 +60,28 @@ func NewClient(session Session, opts ...Option) (*Client, error) {
 
 func (c *Client) APIURL() string { return c.session.APIURL }
 
+func (c *Client) Download(ctx context.Context, target string, destination io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.session.Token)
+	req.AddCookie(&http.Cookie{Name: "d", Value: c.session.Cookie})
+	if c.session.CookieS != "" {
+		req.AddCookie(&http.Cookie{Name: "d-s", Value: c.session.CookieS})
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("download Slack file: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("download Slack file returned HTTP %d", resp.StatusCode)
+	}
+	_, err = io.Copy(destination, resp.Body)
+	return err
+}
+
 // Connect uses the same bootstrap method as Slack's web client. Besides being
 // representative of normal client traffic, client.boot supplies both the user
 // and team identity needed by the CLI.

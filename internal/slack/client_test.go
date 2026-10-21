@@ -292,6 +292,55 @@ func TestProfileSupportingMethods(t *testing.T) {
 	}
 }
 
+func TestSearchAndAuthenticatedDownload(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/search.messages":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			if r.Form.Get("query") != "needle" {
+				t.Errorf("message query = %q", r.Form.Get("query"))
+			}
+			io.WriteString(w, `{"ok":true,"messages":{"matches":[{"text":"needle","ts":"1710000000.1","channel":{"id":"C1","name":"general"}}],"total":1}}`)
+		case "/api/search.files":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			io.WriteString(w, `{"ok":true,"files":{"matches":[{"id":"F1","name":"needle.png","mimetype":"image/png","url_private_download":"`+server.URL+`/download"}],"total":1}}`)
+		case "/download":
+			if got := r.Header.Get("Authorization"); got != "Bearer xoxc-token" {
+				t.Errorf("authorization = %q", got)
+			}
+			cookie, err := r.Cookie("d")
+			if err != nil || cookie.Value != "xoxd-session" {
+				t.Errorf("cookie = %#v, err = %v", cookie, err)
+			}
+			io.WriteString(w, "image bytes")
+		default:
+			t.Errorf("path = %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, total, err := client.SearchMessages(context.Background(), "needle")
+	if err != nil || total != 1 || len(messages) != 1 || messages[0].Channel.Name != "general" {
+		t.Fatalf("messages = %#v, total = %d, err = %v", messages, total, err)
+	}
+	files, total, err := client.SearchFiles(context.Background(), "needle")
+	if err != nil || total != 1 || len(files) != 1 {
+		t.Fatalf("files = %#v, total = %d, err = %v", files, total, err)
+	}
+	var downloaded strings.Builder
+	if err := client.Download(context.Background(), files[0].URLPrivateDownload, &downloaded); err != nil || downloaded.String() != "image bytes" {
+		t.Fatalf("download = %q, err = %v", downloaded.String(), err)
+	}
+}
+
 func TestConnectDoesNotAdoptEnterpriseNavigationURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/client.boot" {

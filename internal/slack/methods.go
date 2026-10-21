@@ -86,11 +86,16 @@ func (c *Client) ListChannelSections(ctx context.Context) ([]ChannelSection, err
 }
 
 type File struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Title      string `json:"title"`
-	Mimetype   string `json:"mimetype"`
-	URLPrivate string `json:"url_private"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Title              string `json:"title"`
+	Mimetype           string `json:"mimetype"`
+	PrettyType         string `json:"pretty_type"`
+	URLPrivate         string `json:"url_private"`
+	URLPrivateDownload string `json:"url_private_download"`
+	Permalink          string `json:"permalink"`
+	User               string `json:"user"`
+	Size               int64  `json:"size"`
 }
 
 type Reaction struct {
@@ -177,6 +182,36 @@ func (c *Client) PostMessage(ctx context.Context, channel, text, threadTimestamp
 	}
 	err := c.Call(ctx, "chat.postMessage", params, &result)
 	return result.Message, err
+}
+
+type MessageSearchMatch struct {
+	Message
+	Channel   Conversation `json:"channel"`
+	Permalink string       `json:"permalink"`
+}
+
+func (c *Client) SearchMessages(ctx context.Context, query string) ([]MessageSearchMatch, int, error) {
+	params := url.Values{"query": {query}, "sort": {"timestamp"}, "sort_dir": {"desc"}, "highlight": {"false"}}
+	var result struct {
+		Messages struct {
+			Matches []MessageSearchMatch `json:"matches"`
+			Total   int                  `json:"total"`
+		} `json:"messages"`
+	}
+	err := c.Call(ctx, "search.messages", params, &result)
+	return result.Messages.Matches, result.Messages.Total, err
+}
+
+func (c *Client) SearchFiles(ctx context.Context, query string) ([]File, int, error) {
+	params := url.Values{"query": {query}, "sort": {"timestamp"}, "sort_dir": {"desc"}, "highlight": {"false"}}
+	var result struct {
+		Files struct {
+			Matches []File `json:"matches"`
+			Total   int    `json:"total"`
+		} `json:"files"`
+	}
+	err := c.Call(ctx, "search.files", params, &result)
+	return result.Files.Matches, result.Files.Total, err
 }
 
 func (c *Client) ListConversations(ctx context.Context, cursor string, limit int) ([]Conversation, string, error) {

@@ -51,16 +51,17 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 ## Files and media
 
 - [~] File names and MIME types in messages
-- [ ] Authenticated file download and open/save actions
+- [x] Authenticated file download and default-viewer open actions
 - [ ] File upload, drag/drop, clipboard paste, and filename anonymisation
 - [ ] Inline images using Kitty graphics, iTerm2 images, or Sixel when supported
-- [ ] Text fallback and external viewer for terminals without graphics support
+- [x] File rows identify images and open them in the system image viewer
+- [ ] Text fallback for terminals without graphics support
 - [ ] Image galleries, video/audio playback handoff, clips, and transcripts
 - [ ] Files view and file search
 
 ## Search and activity
 
-- [ ] Message, file, channel, and people search with filters
+- [~] Message and file search; channel/people search and richer filters remain planned
 - [ ] Activity/mentions/reactions/invites view
 - [ ] Threads view, saved items, reminders, and later/to-do view
 - [ ] Search history and keyboard quick switcher
