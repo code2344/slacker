@@ -10,6 +10,7 @@ import (
 	"github.com/ayn2op/tview"
 	"github.com/ayn2op/tview/flex"
 	"github.com/ayn2op/tview/layers"
+	"github.com/ayn2op/tview/modal"
 	"github.com/ayn2op/tview/tree"
 	"github.com/code2344/slacker/internal/config"
 	"github.com/code2344/slacker/internal/slack"
@@ -27,7 +28,13 @@ type Model struct {
 	composer           *tview.TextArea
 	main               *flex.Model
 	right              *flex.Model
+	inspector          *flex.Model
+	threadMessages     *tree.Model
+	threadComposer     *tview.TextArea
+	inspectorVisible   bool
 	client             *slack.Client
+	users              map[string]slack.User
+	counts             map[string]slack.ConversationCount
 	conversations      map[string]slack.Conversation
 	activeConversation string
 	activeThread       string
@@ -52,6 +59,7 @@ type messageReference struct {
 	conversation slack.Conversation
 	message      slack.Message
 }
+type profileReference struct{ userID string }
 type threadBackReference struct{ conversation slack.Conversation }
 type threadLoadedMsg struct {
 	conversation slack.Conversation
@@ -69,17 +77,22 @@ type realtimeEventMsg struct {
 	err   error
 }
 
-func NewModel(cfg *config.Config, workspaceName string, conversations []slack.Conversation, sections []slack.ChannelSection, client *slack.Client) *Model {
+func NewModel(cfg *config.Config, workspaceName string, conversations []slack.Conversation, sections []slack.ChannelSection, users map[string]slack.User, counts map[string]slack.ConversationCount, client *slack.Client) *Model {
 	m := &Model{
-		Layers:        layers.New(),
-		cfg:           cfg,
-		sidebar:       tree.NewModel(),
-		messages:      tree.NewModel(),
-		composer:      tview.NewTextArea(),
-		main:          flex.NewModel(),
-		right:         flex.NewModel(),
-		client:        client,
-		conversations: make(map[string]slack.Conversation, len(conversations)),
+		Layers:         layers.New(),
+		cfg:            cfg,
+		sidebar:        tree.NewModel(),
+		messages:       tree.NewModel(),
+		composer:       tview.NewTextArea(),
+		main:           flex.NewModel(),
+		right:          flex.NewModel(),
+		inspector:      flex.NewModel(),
+		threadMessages: tree.NewModel(),
+		threadComposer: tview.NewTextArea(),
+		client:         client,
+		users:          users,
+		counts:         counts,
+		conversations:  make(map[string]slack.Conversation, len(conversations)),
 	}
 	m.build(workspaceName, conversations, sections)
 	return m
@@ -118,11 +131,20 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 		prefix := "# "
 		if conversation.IsIM || conversation.IsMPIM {
 			prefix = "@ "
+			if user, ok := m.users[conversation.User]; ok {
+				name = displayName(user)
+			}
 		} else if conversation.IsPrivate {
 			prefix = "🔒 "
 		}
 		if name == "" {
 			name = conversation.ID
+		}
+		if count := m.counts[conversation.ID]; count.UnreadCount > 0 || count.MentionCount > 0 || (count.Latest != "" && count.Latest > count.LastRead) {
+			prefix = "● " + prefix
+			if count.MentionCount > 0 {
+				name += fmt.Sprintf(" (%d)", count.MentionCount)
+			}
 		}
 		parent.AddChild(tree.NewNode(prefix + name).SetReference(conversation.ID))
 	}
@@ -176,6 +198,13 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	m.right.SetDirection(flex.DirectionRow).
 		AddItem(m.messages, 0, 1, false).
 		AddItem(m.composer, 3, 0, true)
+	m.threadMessages.SetRoot(tree.NewNode("")).SetTopLevel(1).SetTitle("Thread")
+	ui.ConfigureBox(m.threadMessages.Box, &m.cfg.Theme)
+	m.threadComposer.SetTitle("Reply in thread")
+	ui.ConfigureBox(m.threadComposer.Box, &m.cfg.Theme)
+	m.inspector.SetDirection(flex.DirectionRow).
+		AddItem(m.threadMessages, 0, 1, false).
+		AddItem(m.threadComposer, 3, 0, true)
 	m.main.SetDirection(flex.DirectionColumn).
 		AddItem(m.sidebar, 0, m.cfg.Sidebar.WidthPercent, true).
 		AddItem(m.right, 0, 100-m.cfg.Sidebar.WidthPercent, false)
@@ -222,8 +251,15 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			return tview.Quit()
 		}
 		if msg.Key() == tcell.KeyEscape && m.activeThread != "" {
-			m.activeThread = ""
-			return m.loadHistory(m.conversations[m.activeConversation])
+			m.closeInspector()
+			return nil
+		}
+		if msg.Key() == tcell.KeyEnter && m.activeThread != "" && m.main.Focused() == 2 && m.inspector.Focused() == 1 {
+			text := strings.TrimSpace(m.threadComposer.Text())
+			if text != "" {
+				m.threadComposer.SetDisabled(true)
+				return m.sendMessage(m.conversations[m.activeConversation], text, m.activeThread)
+			}
 		}
 		if msg.Key() == tcell.KeyEnter && m.activeConversation != "" && m.main.Focused() == 1 && m.right.Focused() == 1 {
 			text := strings.TrimSpace(m.composer.Text())
@@ -240,6 +276,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			if reference == "" || m.client == nil {
 				break
 			}
+			m.closeInspector()
 			conversation := m.conversations[reference]
 			m.activeConversation, m.activeThread = reference, ""
 			m.messages.SetTitle(conversationTitle(conversation))
@@ -252,9 +289,14 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 				timestamp = reference.message.ThreadTS
 			}
 			return m.loadThread(reference.conversation, timestamp)
+		case profileReference:
+			if user, ok := m.users[reference.userID]; ok {
+				profile := modal.NewModel().SetText(profileText(user)).AddButtons([]string{"Close"})
+				m.AddLayer(profile, layers.WithName("profile"), layers.WithResize(true), layers.WithOverlay())
+			}
 		case threadBackReference:
-			m.activeThread = ""
-			return m.loadHistory(reference.conversation)
+			m.closeInspector()
+			return nil
 		}
 	case historyLoadedMsg:
 		if msg.conversation.ID != m.activeConversation {
@@ -278,7 +320,12 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.composer.SetTitle("Send failed: " + msg.err.Error())
 			break
 		}
-		m.composer.SetText("", false)
+		if msg.thread != "" {
+			m.threadComposer.SetText("", false)
+			m.threadComposer.SetDisabled(false)
+		} else {
+			m.composer.SetText("", false)
+		}
 		if msg.thread != "" {
 			return m.loadThread(msg.conversation, msg.thread)
 		}
@@ -292,9 +339,8 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			break
 		}
 		m.activeThread = msg.timestamp
-		m.showMessages(msg.conversation, msg.messages, false, true)
-		m.composer.SetDisabled(false)
-		m.composer.SetTitle("Reply in thread")
+		m.showThread(msg.conversation, msg.messages)
+		m.openInspector()
 	case realtimeConnectedMsg:
 		if msg.err != nil {
 			return m.reconnectRealtime()
@@ -314,6 +360,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			}
 		}
 		return tview.Batch(commands...)
+	case modal.DoneMsg:
+		m.RemoveLayer("profile")
+		return nil
 	}
 	return m.Layers.Update(msg)
 }
@@ -394,12 +443,18 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 		if author == "" {
 			author = "Slack"
 		}
+		if user, ok := m.users[message.User]; ok {
+			author = displayName(user)
+		}
 		text := strings.ReplaceAll(message.Text, "\n", " ↵ ")
 		line := fmt.Sprintf("%s  %s  %s", author, formatTimestamp(message.Timestamp), text)
 		if message.ReplyCount > 0 {
 			line += fmt.Sprintf("  [%d replies]", message.ReplyCount)
 		}
 		node := tree.NewNode(line).SetReference(messageReference{conversation: conversation, message: message})
+		if message.User != "" {
+			node.AddChild(tree.NewNode("Profile: " + author).SetReference(profileReference{userID: message.User}))
+		}
 		for _, file := range message.Files {
 			name := file.Title
 			if name == "" {
@@ -418,6 +473,79 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 	} else {
 		m.messages.SetTitle(conversationTitle(conversation))
 	}
+}
+
+func (m *Model) showThread(conversation slack.Conversation, messages []slack.Message) {
+	root := tree.NewNode("")
+	root.AddChild(tree.NewNode("× Close thread").SetReference(threadBackReference{conversation: conversation}))
+	for _, message := range messages {
+		author := message.Username
+		if user, ok := m.users[message.User]; ok {
+			author = displayName(user)
+		}
+		if author == "" {
+			author = message.User
+		}
+		if author == "" {
+			author = "Slack"
+		}
+		line := fmt.Sprintf("%s  %s  %s", author, formatTimestamp(message.Timestamp), strings.ReplaceAll(message.Text, "\n", " ↵ "))
+		node := tree.NewNode(line)
+		if message.User != "" {
+			node.AddChild(tree.NewNode("Profile: " + author).SetReference(profileReference{userID: message.User}))
+		}
+		root.AddChild(node)
+	}
+	m.threadMessages.SetRoot(root).SetTopLevel(1).SetTitle("Thread in " + conversationTitle(conversation))
+}
+
+func (m *Model) openInspector() {
+	if m.inspectorVisible {
+		return
+	}
+	m.main.ResizeItem(m.sidebar, 0, 24)
+	m.main.ResizeItem(m.right, 0, 48)
+	m.main.AddItem(m.inspector, 0, 28, false)
+	m.inspectorVisible = true
+}
+
+func (m *Model) closeInspector() {
+	if !m.inspectorVisible {
+		return
+	}
+	m.main.RemoveItem(m.inspector)
+	m.main.ResizeItem(m.sidebar, 0, m.cfg.Sidebar.WidthPercent)
+	m.main.ResizeItem(m.right, 0, 100-m.cfg.Sidebar.WidthPercent)
+	m.activeThread = ""
+	m.inspectorVisible = false
+}
+
+func displayName(user slack.User) string {
+	if user.Profile.DisplayName != "" {
+		return user.Profile.DisplayName
+	}
+	if user.Profile.RealName != "" {
+		return user.Profile.RealName
+	}
+	if user.RealName != "" {
+		return user.RealName
+	}
+	return user.Name
+}
+
+func profileText(user slack.User) string {
+	name := displayName(user)
+	lines := []string{name}
+	if user.Profile.Title != "" {
+		lines = append(lines, user.Profile.Title)
+	}
+	if user.Profile.Pronouns != "" {
+		lines = append(lines, "Pronouns: "+user.Profile.Pronouns)
+	}
+	if user.Profile.StatusEmoji != "" || user.Profile.StatusText != "" {
+		lines = append(lines, strings.TrimSpace(user.Profile.StatusEmoji+" "+user.Profile.StatusText))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) loadHistory(conversation slack.Conversation) tview.Cmd {

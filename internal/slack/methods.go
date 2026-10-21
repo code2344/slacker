@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 )
@@ -170,15 +171,62 @@ func (c *Client) ListConversations(ctx context.Context, cursor string, limit int
 }
 
 type User struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Deleted bool   `json:"deleted"`
-	Profile struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	RealName string `json:"real_name"`
+	Deleted  bool   `json:"deleted"`
+	Profile  struct {
 		DisplayName string `json:"display_name"`
 		RealName    string `json:"real_name"`
 		Pronouns    string `json:"pronouns"`
+		Title       string `json:"title"`
+		StatusText  string `json:"status_text"`
+		StatusEmoji string `json:"status_emoji"`
 		Image48     string `json:"image_48"`
 	} `json:"profile"`
+}
+
+type UserBoot struct {
+	Channels         []Conversation `json:"channels"`
+	IMs              []Conversation `json:"ims"`
+	Members          []User         `json:"members"`
+	ChannelsPriority map[string]int `json:"channels_priority"`
+}
+
+func (c *Client) UserBoot(ctx context.Context) (UserBoot, error) {
+	var result UserBoot
+	err := c.Call(ctx, "client.userBoot", url.Values{"return_all_relevant_mpdms": {"true"}}, &result)
+	return result, err
+}
+
+type ConversationCount struct {
+	ID           string `json:"id"`
+	LastRead     string `json:"last_read"`
+	Latest       string `json:"latest"`
+	MentionCount int    `json:"mention_count"`
+	UnreadCount  int    `json:"unread_count"`
+}
+
+func (c *Client) ConversationCounts(ctx context.Context) (map[string]ConversationCount, error) {
+	var result struct {
+		Channels json.RawMessage `json:"channels"`
+		IMs      json.RawMessage `json:"ims"`
+		MPIMs    json.RawMessage `json:"mpims"`
+	}
+	if err := c.Call(ctx, "client.counts", url.Values{"include_all_unreads": {"true"}, "thread_counts_by_channel": {"true"}}, &result); err != nil {
+		return nil, err
+	}
+	out := map[string]ConversationCount{}
+	for _, raw := range []json.RawMessage{result.Channels, result.IMs, result.MPIMs} {
+		var items []ConversationCount
+		if len(raw) == 0 || json.Unmarshal(raw, &items) != nil {
+			continue
+		}
+		for _, item := range items {
+			out[item.ID] = item
+		}
+	}
+	return out, nil
 }
 
 func (c *Client) ListUsers(ctx context.Context, cursor string, limit int) ([]User, string, error) {

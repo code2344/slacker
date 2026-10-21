@@ -774,6 +774,13 @@ func runTUI(cfg *config.Config) error {
 		return err
 	}
 	sections, _ := client.ListChannelSections(ctx)
+	users := map[string]slack.User{}
+	if boot, bootErr := client.UserBoot(ctx); bootErr == nil {
+		for _, user := range boot.Members {
+			users[user.ID] = user
+		}
+	}
+	counts, _ := client.ConversationCounts(ctx)
 	screen, err := tcell.NewScreen()
 	if err != nil {
 		return err
@@ -786,7 +793,7 @@ func runTUI(cfg *config.Config) error {
 	}
 	screen.EnablePaste()
 	tview.Styles = tview.Theme{}
-	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, conversations, sections, client), tview.WithScreen(screen)).Run()
+	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, conversations, sections, users, counts, client), tview.WithScreen(screen)).Run()
 }
 
 func printUsage() {
