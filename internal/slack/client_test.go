@@ -227,6 +227,30 @@ func TestListChannelSections(t *testing.T) {
 	}
 }
 
+func TestUserInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/users.info" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("user") != "U123" {
+			t.Errorf("user = %q", r.Form.Get("user"))
+		}
+		io.WriteString(w, `{"ok":true,"user":{"id":"U123","name":"ruben","profile":{"display_name":"Ruben"}}}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := client.UserInfo(context.Background(), "U123")
+	if err != nil || user.ID != "U123" || user.Profile.DisplayName != "Ruben" {
+		t.Fatalf("user = %#v, err = %v", user, err)
+	}
+}
+
 func TestConnectDoesNotAdoptEnterpriseNavigationURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/client.boot" {

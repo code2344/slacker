@@ -3,7 +3,9 @@ package root
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ayn2op/tview/tree"
 	"github.com/code2344/slacker/internal/slack"
 )
 
@@ -58,5 +60,50 @@ func TestOwnReactionNamesAndRendering(t *testing.T) {
 	}
 	if got := renderReactions(reactions, "U1"); got != ":wave: 2*  :eyes: 1" {
 		t.Fatalf("rendered reactions = %q", got)
+	}
+}
+
+func TestMessagesUseProfileRowsAndExplicitThreadRows(t *testing.T) {
+	user := slack.User{ID: "U1", Name: "ruben"}
+	user.Profile.DisplayName = "Ruben"
+	m := &Model{
+		messages:      tree.NewModel(),
+		users:         map[string]slack.User{"U1": user},
+		conversations: map[string]slack.Conversation{"C1": {ID: "C1", Name: "lounge"}},
+	}
+	conversation := m.conversations["C1"]
+	m.showMessages(conversation, []slack.Message{
+		{User: "U1", Text: "second", Timestamp: "1710000120.0"},
+		{User: "U1", Text: "first", Timestamp: "1710000000.0", ReplyCount: 2},
+	}, false, false)
+	children := m.messages.Root().Children()
+	if len(children) != 4 {
+		t.Fatalf("top-level rows = %d, want 4", len(children))
+	}
+	if _, ok := children[1].Reference().(messageProfileReference); !ok {
+		t.Fatalf("first message reference = %T", children[1].Reference())
+	}
+	if _, ok := children[3].Reference().(messageReference); !ok {
+		t.Fatalf("compact message reference = %T", children[3].Reference())
+	}
+	if len(children[1].Children()) != 0 {
+		t.Fatalf("first message has %d nested rows", len(children[1].Children()))
+	}
+	if _, ok := children[2].Reference().(threadReference); !ok {
+		t.Fatalf("reply row reference = %T", children[2].Reference())
+	}
+	for _, child := range children {
+		for _, segment := range child.Line() {
+			if strings.Contains(segment.Text, "Profile:") {
+				t.Fatalf("found obsolete profile child %q", segment.Text)
+			}
+		}
+	}
+}
+
+func TestFormatRelativeTimestamp(t *testing.T) {
+	now := time.Unix(1710000180, 0).Local()
+	if got := formatRelativeTimestamp("1710000000.0", now); got != "3 minutes ago" {
+		t.Fatalf("relative timestamp = %q", got)
 	}
 }

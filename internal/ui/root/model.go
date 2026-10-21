@@ -33,7 +33,9 @@ type Model struct {
 	inspector          *flex.Model
 	threadMessages     *tree.Model
 	threadComposer     *tview.TextArea
+	profile            *tree.Model
 	inspectorVisible   bool
+	inspectorKind      string
 	client             *slack.Client
 	users              map[string]slack.User
 	counts             map[string]slack.ConversationCount
@@ -74,13 +76,20 @@ type messageReference struct {
 	message       slack.Message
 	contextThread string
 }
-type profileReference struct{ userID string }
+type messageProfileReference struct{ messageReference }
+type threadReference struct{ messageReference }
 type threadBackReference struct{ conversation slack.Conversation }
+type inspectorCloseReference struct{}
 type threadLoadedMsg struct {
 	conversation slack.Conversation
 	timestamp    string
 	messages     []slack.Message
 	err          error
+}
+type userLoadedMsg struct {
+	userID string
+	user   slack.User
+	err    error
 }
 
 type realtimeConnectedMsg struct {
@@ -104,6 +113,7 @@ func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversation
 		inspector:      flex.NewModel(),
 		threadMessages: tree.NewModel(),
 		threadComposer: tview.NewTextArea(),
+		profile:        tree.NewModel(),
 		client:         client,
 		selfUserID:     selfUserID,
 		users:          users,
@@ -218,9 +228,9 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	ui.ConfigureBox(m.threadMessages.Box, &m.cfg.Theme)
 	m.threadComposer.SetTitle("Reply in thread")
 	ui.ConfigureBox(m.threadComposer.Box, &m.cfg.Theme)
-	m.inspector.SetDirection(flex.DirectionRow).
-		AddItem(m.threadMessages, 0, 1, false).
-		AddItem(m.threadComposer, 3, 0, true)
+	m.profile.SetRoot(tree.NewNode("")).SetTopLevel(1).SetTitle("Profile")
+	ui.ConfigureBox(m.profile.Box, &m.cfg.Theme)
+	m.inspector.SetDirection(flex.DirectionRow)
 	m.main.SetDirection(flex.DirectionColumn).
 		AddItem(m.sidebar, 0, m.cfg.Sidebar.WidthPercent, true).
 		AddItem(m.right, 0, 100-m.cfg.Sidebar.WidthPercent, false)
@@ -270,12 +280,18 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.cancelEdit()
 			return nil
 		}
-		if msg.Key() == tcell.KeyEscape && m.activeThread != "" {
+		if msg.Key() == tcell.KeyEscape && m.inspectorVisible {
 			m.closeInspector()
 			return nil
 		}
 		if reference, ok := m.selectedMessage(); ok {
 			switch msg.Str() {
+			case "t":
+				timestamp := reference.message.Timestamp
+				if reference.message.ThreadTS != "" {
+					timestamp = reference.message.ThreadTS
+				}
+				return m.loadThread(reference.conversation, timestamp)
 			case "e":
 				if reference.message.User == m.selfUserID {
 					m.beginEdit(reference)
@@ -337,18 +353,20 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.setMessageNotice("Loading messages…")
 			m.composer.SetDisabled(true)
 			return m.loadHistory(conversation)
+		case messageProfileReference:
+			return m.showProfile(reference.message.User)
 		case messageReference:
+			return nil
+		case threadReference:
 			timestamp := reference.message.Timestamp
 			if reference.message.ThreadTS != "" {
 				timestamp = reference.message.ThreadTS
 			}
 			return m.loadThread(reference.conversation, timestamp)
-		case profileReference:
-			if user, ok := m.users[reference.userID]; ok {
-				profile := modal.NewModel().SetText(profileText(user)).AddButtons([]string{"Close"})
-				m.AddLayer(profile, layers.WithName("profile"), layers.WithResize(true), layers.WithOverlay())
-			}
 		case threadBackReference:
+			m.closeInspector()
+			return nil
+		case inspectorCloseReference:
 			m.closeInspector()
 			return nil
 		}
@@ -419,6 +437,16 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.activeThread = msg.timestamp
 		m.showThread(msg.conversation, msg.messages)
 		m.openInspector()
+	case userLoadedMsg:
+		if msg.err != nil {
+			m.showProfileError(msg.userID, msg.err)
+			break
+		}
+		if msg.user.ID == "" {
+			msg.user.ID = msg.userID
+		}
+		m.users[msg.user.ID] = msg.user
+		m.showProfile(msg.user.ID)
 	case realtimeConnectedMsg:
 		if msg.err != nil {
 			return m.reconnectRealtime()
@@ -458,7 +486,6 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			}
 			return nil
 		}
-		m.RemoveLayer("profile")
 		return nil
 	}
 	return m.Layers.Update(msg)
@@ -474,8 +501,16 @@ func (m *Model) selectedMessage() (messageReference, bool) {
 	if node == nil {
 		return messageReference{}, false
 	}
-	reference, ok := node.Reference().(messageReference)
-	return reference, ok
+	switch reference := node.Reference().(type) {
+	case messageReference:
+		return reference, true
+	case messageProfileReference:
+		return reference.messageReference, true
+	case threadReference:
+		return reference.messageReference, true
+	default:
+		return messageReference{}, false
+	}
 }
 
 func (m *Model) beginEdit(reference messageReference) {
@@ -613,13 +648,16 @@ func (m *Model) setMessageNotice(value string) {
 
 func (m *Model) showMessages(conversation slack.Conversation, messages []slack.Message, hasMore, thread bool) {
 	root := tree.NewNode("")
-	root.AddChild(tree.NewNode("Enter thread/profile · r react · - remove reaction · e edit · d delete").SetSelectable(false))
+	root.AddChild(tree.NewNode("Click an author for profile · t thread · r react · - remove · e edit · d delete").SetSelectable(false))
 	if thread {
 		root.AddChild(tree.NewNode("← Back to channel").SetReference(threadBackReference{conversation: conversation}))
 	}
 	if hasMore {
 		root.AddChild(tree.NewNode("— showing the latest messages —").SetSelectable(false))
 	}
+	previousAuthor := ""
+	var previousTime time.Time
+	now := time.Now()
 	for i := len(messages) - 1; i >= 0; i-- {
 		message := messages[i]
 		author := message.Username
@@ -632,29 +670,48 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 		if user, ok := m.users[message.User]; ok {
 			author = displayName(user)
 		}
+		messageTime := parseSlackTimestamp(message.Timestamp)
+		authorKey := message.User
+		if authorKey == "" {
+			authorKey = message.Username
+		}
+		compact := previousAuthor != "" && authorKey == previousAuthor && !previousTime.IsZero() && !messageTime.IsZero() && messageTime.Sub(previousTime) <= 5*time.Minute
 		text := strings.ReplaceAll(m.renderSlackText(message.Text), "\n", " ↵ ")
-		line := fmt.Sprintf("%s  %s  %s", author, formatTimestamp(message.Timestamp), text)
+		when := formatRelativeTimestamp(message.Timestamp, now)
+		line := fmt.Sprintf("@%-16s  %-14s  %s", author, when, text)
 		if message.Edited != nil {
 			line += "  (edited)"
 		}
-		if message.ReplyCount > 0 {
-			line += fmt.Sprintf("  [%d replies]", message.ReplyCount)
+		reference := messageReference{conversation: conversation, message: message}
+		var node *tree.Node
+		if compact {
+			line = fmt.Sprintf("  %-16s  %-14s  %s", "", when, text)
+			if message.Edited != nil {
+				line += "  (edited)"
+			}
+			node = tree.NewNode(line).SetReference(reference).SetExpanded(true)
+		} else {
+			node = tree.NewNode(line).SetReference(messageProfileReference{messageReference: reference}).SetExpanded(true)
 		}
-		node := tree.NewNode(line).SetReference(messageReference{conversation: conversation, message: message}).SetExpanded(true)
-		if message.User != "" {
-			node.AddChild(tree.NewNode("Profile: " + author).SetReference(profileReference{userID: message.User}))
-		}
+		root.AddChild(node)
 		for _, file := range message.Files {
 			name := file.Title
 			if name == "" {
 				name = file.Name
 			}
-			node.AddChild(tree.NewNode("📎 " + name).SetSelectable(false))
+			root.AddChild(tree.NewNode("  📎 " + name).SetSelectable(false))
 		}
 		if len(message.Reactions) > 0 {
-			node.AddChild(tree.NewNode("Reactions: " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
+			root.AddChild(tree.NewNode("  " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
 		}
-		root.AddChild(node)
+		if message.ReplyCount > 0 {
+			label := "reply"
+			if message.ReplyCount != 1 {
+				label = "replies"
+			}
+			root.AddChild(tree.NewNode(fmt.Sprintf("  [%d %s — open thread]", message.ReplyCount, label)).SetReference(threadReference{messageReference: reference}))
+		}
+		previousAuthor, previousTime = authorKey, messageTime
 	}
 	if len(messages) == 0 {
 		root.AddChild(tree.NewNode("No messages yet.").SetSelectable(false))
@@ -670,7 +727,10 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 func (m *Model) showThread(conversation slack.Conversation, messages []slack.Message) {
 	root := tree.NewNode("")
 	root.AddChild(tree.NewNode("× Close thread").SetReference(threadBackReference{conversation: conversation}))
-	root.AddChild(tree.NewNode("r react · - remove reaction · e edit · d delete").SetSelectable(false))
+	root.AddChild(tree.NewNode("Click an author for profile · r react · - remove · e edit · d delete").SetSelectable(false))
+	previousAuthor := ""
+	var previousTime time.Time
+	now := time.Now()
 	for _, message := range messages {
 		author := message.Username
 		if user, ok := m.users[message.User]; ok {
@@ -682,20 +742,36 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 		if author == "" {
 			author = "Slack"
 		}
-		line := fmt.Sprintf("%s  %s  %s", author, formatTimestamp(message.Timestamp), strings.ReplaceAll(m.renderSlackText(message.Text), "\n", " ↵ "))
+		messageTime := parseSlackTimestamp(message.Timestamp)
+		authorKey := message.User
+		if authorKey == "" {
+			authorKey = message.Username
+		}
+		compact := previousAuthor != "" && authorKey == previousAuthor && !previousTime.IsZero() && !messageTime.IsZero() && messageTime.Sub(previousTime) <= 5*time.Minute
+		when := formatRelativeTimestamp(message.Timestamp, now)
+		line := fmt.Sprintf("@%-16s  %-14s  %s", author, when, strings.ReplaceAll(m.renderSlackText(message.Text), "\n", " ↵ "))
 		if message.Edited != nil {
 			line += "  (edited)"
 		}
-		node := tree.NewNode(line).SetReference(messageReference{conversation: conversation, message: message, contextThread: m.activeThread}).SetExpanded(true)
-		if message.User != "" {
-			node.AddChild(tree.NewNode("Profile: " + author).SetReference(profileReference{userID: message.User}))
-		}
-		if len(message.Reactions) > 0 {
-			node.AddChild(tree.NewNode("Reactions: " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
+		reference := messageReference{conversation: conversation, message: message, contextThread: m.activeThread}
+		var node *tree.Node
+		if compact {
+			line = fmt.Sprintf("  %-16s  %-14s  %s", "", when, strings.ReplaceAll(m.renderSlackText(message.Text), "\n", " ↵ "))
+			if message.Edited != nil {
+				line += "  (edited)"
+			}
+			node = tree.NewNode(line).SetReference(reference).SetExpanded(true)
+		} else {
+			node = tree.NewNode(line).SetReference(messageProfileReference{messageReference: reference}).SetExpanded(true)
 		}
 		root.AddChild(node)
+		if len(message.Reactions) > 0 {
+			root.AddChild(tree.NewNode("  " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
+		}
+		previousAuthor, previousTime = authorKey, messageTime
 	}
 	m.threadMessages.SetRoot(root).SetTopLevel(1).SetTitle("Thread in " + conversationTitle(conversation))
+	m.showThreadInspector()
 }
 
 var slackEntityPattern = regexp.MustCompile(`<([@#!]?)([^>|]+)(?:\|([^>]+))?>`)
@@ -759,6 +835,68 @@ func renderReactions(reactions []slack.Reaction, selfUserID string) string {
 	return strings.Join(parts, "  ")
 }
 
+func (m *Model) showProfile(userID string) tview.Cmd {
+	user, ok := m.users[userID]
+	if !ok {
+		root := tree.NewNode("")
+		root.AddChild(tree.NewNode("× Close profile").SetReference(inspectorCloseReference{}))
+		root.AddChild(tree.NewNode("Loading profile…").SetSelectable(false))
+		m.profile.SetRoot(root).SetTopLevel(1).SetTitle("Profile")
+		m.activeThread = ""
+		m.inspector.Clear().SetDirection(flex.DirectionRow).AddItem(m.profile, 0, 1, true)
+		m.inspectorKind = "profile"
+		m.openInspector()
+		return m.loadUser(userID)
+	}
+	root := tree.NewNode("")
+	root.AddChild(tree.NewNode("× Close profile").SetReference(inspectorCloseReference{}))
+	root.AddChild(tree.NewNode(displayName(user)).SetSelectable(false))
+	if user.Name != "" && user.Name != displayName(user) {
+		root.AddChild(tree.NewNode("@" + user.Name).SetSelectable(false))
+	}
+	if user.Profile.StatusEmoji != "" || user.Profile.StatusText != "" {
+		root.AddChild(tree.NewNode(strings.TrimSpace(user.Profile.StatusEmoji + " " + user.Profile.StatusText)).SetSelectable(false))
+	}
+	if user.Profile.Title != "" {
+		root.AddChild(tree.NewNode(user.Profile.Title).SetSelectable(false))
+	}
+	if user.Profile.Pronouns != "" {
+		root.AddChild(tree.NewNode("Pronouns  " + user.Profile.Pronouns).SetSelectable(false))
+	}
+	if user.ID != "" {
+		root.AddChild(tree.NewNode("Member ID  " + user.ID).SetSelectable(false))
+	}
+	m.profile.SetRoot(root).SetTopLevel(1).SetTitle("Profile")
+	m.activeThread = ""
+	m.inspector.Clear().SetDirection(flex.DirectionRow).AddItem(m.profile, 0, 1, true)
+	m.inspectorKind = "profile"
+	m.openInspector()
+	return nil
+}
+
+func (m *Model) showProfileError(userID string, err error) {
+	root := tree.NewNode("")
+	root.AddChild(tree.NewNode("× Close profile").SetReference(inspectorCloseReference{}))
+	root.AddChild(tree.NewNode("Could not load profile for " + userID + ": " + err.Error()).SetSelectable(false))
+	m.profile.SetRoot(root).SetTopLevel(1).SetTitle("Profile")
+}
+
+func (m *Model) loadUser(userID string) tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		user, err := m.client.UserInfo(ctx, userID)
+		return userLoadedMsg{userID: userID, user: user, err: err}
+	}
+}
+
+func (m *Model) showThreadInspector() {
+	m.inspector.Clear().SetDirection(flex.DirectionRow).
+		AddItem(m.threadMessages, 0, 1, false).
+		AddItem(m.threadComposer, 3, 0, true)
+	m.inspectorKind = "thread"
+}
+
 func (m *Model) openInspector() {
 	if m.inspectorVisible {
 		return
@@ -778,6 +916,7 @@ func (m *Model) closeInspector() {
 	m.main.ResizeItem(m.right, 0, 100-m.cfg.Sidebar.WidthPercent)
 	m.activeThread = ""
 	m.inspectorVisible = false
+	m.inspectorKind = ""
 }
 
 func displayName(user slack.User) string {
@@ -793,19 +932,42 @@ func displayName(user slack.User) string {
 	return user.Name
 }
 
-func profileText(user slack.User) string {
-	name := displayName(user)
-	lines := []string{name}
-	if user.Profile.Title != "" {
-		lines = append(lines, user.Profile.Title)
+func parseSlackTimestamp(value string) time.Time {
+	seconds, _, _ := strings.Cut(value, ".")
+	parsed, err := time.ParseDuration(seconds + "s")
+	if err != nil {
+		return time.Time{}
 	}
-	if user.Profile.Pronouns != "" {
-		lines = append(lines, "Pronouns: "+user.Profile.Pronouns)
+	return time.Unix(int64(parsed.Seconds()), 0).Local()
+}
+
+func formatRelativeTimestamp(value string, now time.Time) string {
+	when := parseSlackTimestamp(value)
+	if when.IsZero() {
+		return value
 	}
-	if user.Profile.StatusEmoji != "" || user.Profile.StatusText != "" {
-		lines = append(lines, strings.TrimSpace(user.Profile.StatusEmoji+" "+user.Profile.StatusText))
+	age := now.Sub(when)
+	if age < 0 || age >= 7*24*time.Hour {
+		return when.Format("Jan 2 15:04")
 	}
-	return strings.Join(lines, "\n")
+	if age < time.Minute {
+		return "just now"
+	}
+	if age < time.Hour {
+		minutes := int(age / time.Minute)
+		if minutes == 1 {
+			return "1 minute ago"
+		}
+		return fmt.Sprintf("%d minutes ago", minutes)
+	}
+	if age < 24*time.Hour {
+		hours := int(age / time.Hour)
+		if hours == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", hours)
+	}
+	return when.Format("Mon 15:04")
 }
 
 func (m *Model) loadHistory(conversation slack.Conversation) tview.Cmd {

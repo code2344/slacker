@@ -781,6 +781,9 @@ func runTUI(cfg *config.Config) error {
 			users[user.ID] = user
 		}
 	}
+	if _, ok := users[auth.UserID]; !ok {
+		users[auth.UserID] = slack.User{ID: auth.UserID, Name: auth.User, RealName: auth.User}
+	}
 	counts, _ := client.ConversationCounts(ctx)
 	screen, err := tcell.NewScreen()
 	if err != nil {

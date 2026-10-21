@@ -221,6 +221,14 @@ type UserBoot struct {
 	ChannelsPriority map[string]int `json:"channels_priority"`
 }
 
+func (c *Client) UserInfo(ctx context.Context, userID string) (User, error) {
+	var result struct {
+		User User `json:"user"`
+	}
+	err := c.Call(ctx, "users.info", url.Values{"user": {userID}}, &result)
+	return result.User, err
+}
+
 func (c *Client) UserBoot(ctx context.Context) (UserBoot, error) {
 	var result UserBoot
 	err := c.Call(ctx, "client.userBoot", url.Values{"return_all_relevant_mpdms": {"true"}}, &result)
