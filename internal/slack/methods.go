@@ -332,6 +332,7 @@ func (c *Client) TeamProfile(ctx context.Context) ([]TeamProfileField, error) {
 type UserBoot struct {
 	Channels         []Conversation `json:"channels"`
 	IMs              []Conversation `json:"ims"`
+	MPIMs            []Conversation `json:"mpims"`
 	Members          []User         `json:"members"`
 	ChannelsPriority map[string]int `json:"channels_priority"`
 }

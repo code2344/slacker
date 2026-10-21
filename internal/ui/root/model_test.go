@@ -1,16 +1,13 @@
 package root
 
 import (
-	"bytes"
-	"image"
-	"image/color"
-	"image/png"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ayn2op/tview"
 	"github.com/ayn2op/tview/tree"
+	"github.com/code2344/slacker/internal/config"
 	"github.com/code2344/slacker/internal/slack"
 )
 
@@ -69,17 +66,14 @@ func TestConversationHeaderIncludesTopicAndMembers(t *testing.T) {
 	}
 }
 
-func TestRenderImagePreviewProducesColoredTerminalCells(t *testing.T) {
-	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
-	img.Set(0, 0, color.RGBA{R: 255, A: 255})
-	img.Set(0, 1, color.RGBA{B: 255, A: 255})
-	var encoded bytes.Buffer
-	if err := png.Encode(&encoded, img); err != nil {
-		t.Fatal(err)
+func TestKittyImagePayloadIsChunkedAndSized(t *testing.T) {
+	payload := kittyImagePayload(make([]byte, 5000), 80, 24)
+	encoded := string(payload)
+	if !strings.Contains(encoded, "a=T,f=100,q=2,c=80,r=24,m=1;") {
+		t.Fatalf("first Kitty chunk missing sizing: %q", encoded[:min(120, len(encoded))])
 	}
-	preview, err := renderImagePreview(encoded.Bytes(), 2, 1)
-	if err != nil || len(preview) != 1 || len(preview[0]) != 3 || preview[0][1].Text != "▀" {
-		t.Fatalf("preview = %#v, err = %v", preview, err)
+	if !strings.Contains(encoded, "q=2,m=0;") {
+		t.Fatal("final Kitty chunk is missing")
 	}
 }
 
@@ -99,6 +93,21 @@ func TestAddDirectMessageAttachesAndDeduplicatesSidebarGroup(t *testing.T) {
 	}
 	if got := m.directMessages.Children()[0].Line()[0].Text; got != "@ Ruben" {
 		t.Fatalf("DM row = %q", got)
+	}
+}
+
+func TestDirectMessagesStayInDedicatedSidebarGroup(t *testing.T) {
+	section := slack.ChannelSection{ID: "S1", Name: "Channels"}
+	section.ChannelIDsPage.ChannelIDs = []string{"C1", "D1"}
+	m := NewModel(&config.Config{}, "Team", "U0", []slack.Conversation{
+		{ID: "C1", Name: "general", IsChannel: true},
+		{ID: "D1", IsIM: true, User: "U1"},
+	}, []slack.ChannelSection{section}, map[string]slack.User{"U1": {ID: "U1", Name: "ruben"}}, nil, nil, nil)
+	if len(m.directMessages.Children()) != 1 || m.directMessages.Children()[0].Reference() != "D1" {
+		t.Fatalf("DM rows = %#v", m.directMessages.Children())
+	}
+	if got := m.sidebar.Root().Children()[len(m.sidebar.Root().Children())-1]; got != m.directMessages {
+		t.Fatal("direct messages group is not attached to the sidebar")
 	}
 }
 

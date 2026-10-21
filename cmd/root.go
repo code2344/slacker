@@ -777,6 +777,7 @@ func runTUI(cfg *config.Config) error {
 	sections, _ := client.ListChannelSections(ctx)
 	users := map[string]slack.User{}
 	if boot, bootErr := client.UserBoot(ctx); bootErr == nil {
+		conversations = mergeConversations(conversations, boot.Channels, boot.IMs, boot.MPIMs)
 		for _, user := range boot.Members {
 			users[user.ID] = user
 		}
@@ -799,6 +800,25 @@ func runTUI(cfg *config.Config) error {
 	screen.EnablePaste()
 	tview.Styles = tview.Theme{}
 	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, auth.UserID, conversations, sections, users, profileFields, counts, client), tview.WithScreen(screen)).Run()
+}
+
+func mergeConversations(groups ...[]slack.Conversation) []slack.Conversation {
+	merged := make([]slack.Conversation, 0)
+	positions := make(map[string]int)
+	for _, group := range groups {
+		for _, conversation := range group {
+			if conversation.ID == "" {
+				continue
+			}
+			if position, exists := positions[conversation.ID]; exists {
+				merged[position] = conversation
+				continue
+			}
+			positions[conversation.ID] = len(merged)
+			merged = append(merged, conversation)
+		}
+	}
+	return merged
 }
 
 func printUsage() {

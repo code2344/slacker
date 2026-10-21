@@ -1,15 +1,16 @@
 package root
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"html"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
-	_ "image/png"
-	"io"
+	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,12 +25,12 @@ import (
 	"github.com/ayn2op/tview/flex"
 	"github.com/ayn2op/tview/layers"
 	"github.com/ayn2op/tview/modal"
-	styledtext "github.com/ayn2op/tview/text"
 	"github.com/ayn2op/tview/tree"
 	"github.com/code2344/slacker/internal/config"
 	"github.com/code2344/slacker/internal/slack"
 	"github.com/code2344/slacker/internal/ui"
 	"github.com/gdamore/tcell/v3"
+	"golang.org/x/term"
 )
 
 // Model is the first Slack-backed shell of the three-pane interface.
@@ -70,13 +71,11 @@ type Model struct {
 	pendingMessage     *messageReference
 	stream             *slack.Realtime
 	realtimeFailures   int
-	imagePreviews      map[string][]styledtext.Line
 }
 
 type historyLoadedMsg struct {
 	conversation slack.Conversation
 	messages     []slack.Message
-	previews     map[string][]styledtext.Line
 	hasMore      bool
 	err          error
 }
@@ -110,7 +109,6 @@ type threadLoadedMsg struct {
 	conversation slack.Conversation
 	timestamp    string
 	messages     []slack.Message
-	previews     map[string][]styledtext.Line
 	err          error
 }
 type userLoadedMsg struct {
@@ -137,9 +135,11 @@ type searchLoadedMsg struct {
 	err          error
 }
 type fileOpenedMsg struct {
-	path string
-	err  error
+	path    string
+	preview bool
+	err     error
 }
+type imageViewedMsg struct{ err error }
 type dmOpenedMsg struct {
 	conversation slack.Conversation
 	err          error
@@ -152,20 +152,6 @@ type realtimeConnectedMsg struct {
 type realtimeEventMsg struct {
 	event slack.RealtimeEvent
 	err   error
-}
-
-type cappedWriter struct {
-	w         io.Writer
-	remaining int64
-}
-
-func (w *cappedWriter) Write(data []byte) (int, error) {
-	if int64(len(data)) > w.remaining {
-		return 0, fmt.Errorf("image exceeds preview size limit")
-	}
-	written, err := w.w.Write(data)
-	w.remaining -= int64(written)
-	return written, err
 }
 
 func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversations []slack.Conversation, sections []slack.ChannelSection, users map[string]slack.User, profileFields []slack.TeamProfileField, counts map[string]slack.ConversationCount, client *slack.Client) *Model {
@@ -193,7 +179,6 @@ func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversation
 		profileLookups: make(map[string]bool),
 		counts:         counts,
 		conversations:  make(map[string]slack.Conversation, len(conversations)),
-		imagePreviews:  make(map[string][]styledtext.Line),
 	}
 	for _, field := range profileFields {
 		m.profileFields[field.ID] = field
@@ -257,13 +242,16 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 		parent := sectionNodes[section.ID]
 		for _, id := range section.ChannelIDsPage.ChannelIDs {
 			if conversation, ok := byID[id]; ok {
+				if conversation.IsIM || conversation.IsMPIM {
+					continue
+				}
 				addConversation(parent, conversation)
 			}
 		}
 	}
 	var remaining []slack.Conversation
 	for _, conversation := range conversations {
-		if !assigned[conversation.ID] {
+		if conversation.IsIM || conversation.IsMPIM || !assigned[conversation.ID] {
 			remaining = append(remaining, conversation)
 		}
 	}
@@ -271,9 +259,6 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	for _, conversation := range remaining {
 		if len(sections) > 0 {
 			if conversation.IsIM || conversation.IsMPIM {
-				if dms.Children() == nil {
-					root.AddChild(dms)
-				}
 				addConversation(dms, conversation)
 			} else {
 				if channels.Children() == nil {
@@ -286,6 +271,9 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 		} else {
 			addConversation(channels, conversation)
 		}
+	}
+	if len(sections) > 0 && len(dms.Children()) > 0 {
+		root.AddChild(dms)
 	}
 
 	m.sidebar.SetRoot(root).SetTopLevel(1).SetTitle(workspaceName)
@@ -454,7 +442,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			conversation := m.conversations[reference]
 			m.activeConversation, m.activeThread = reference, ""
 			m.showConversationHeader(conversation)
-			m.messages.SetTitle(m.conversationTitle(conversation))
+			m.messages.SetTitle("Messages")
 			m.setMessageNotice("Loading messages…")
 			m.composer.SetDisabled(true)
 			return m.loadHistory(conversation)
@@ -501,7 +489,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.activeConversation, m.activeThread = msg.conversation.ID, ""
 		m.showConversationHeader(msg.conversation)
 		m.closeInspector()
-		m.messages.SetTitle(m.conversationTitle(msg.conversation))
+		m.messages.SetTitle("Messages")
 		m.composer.SetDisabled(true)
 		m.setMessageNotice("Loading messages…")
 		return m.loadHistory(msg.conversation)
@@ -512,9 +500,6 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		if msg.err != nil {
 			m.setMessageNotice("Could not load messages: " + msg.err.Error())
 			break
-		}
-		for id, preview := range msg.previews {
-			m.imagePreviews[id] = preview
 		}
 		if userIDs := m.unresolvedUserIDs(msg.messages); len(userIDs) > 0 {
 			m.setMessageNotice("Resolving message authors…")
@@ -576,9 +561,6 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.setMessageNotice("Could not load thread: " + msg.err.Error())
 			break
 		}
-		for id, preview := range msg.previews {
-			m.imagePreviews[id] = preview
-		}
 		if userIDs := m.unresolvedUserIDs(msg.messages); len(userIDs) > 0 {
 			return m.loadAuthors(userIDs, nil, &msg)
 		}
@@ -624,8 +606,18 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 	case fileOpenedMsg:
 		if msg.err != nil {
 			m.messages.SetTitle("File failed: " + msg.err.Error())
+		} else if msg.preview {
+			return tview.Suspend(func() tview.Msg {
+				return imageViewedMsg{err: showKittyImage(msg.path)}
+			})
 		} else {
 			m.messages.SetTitle("Opened " + msg.path)
+		}
+	case imageViewedMsg:
+		if msg.err != nil {
+			m.messages.SetTitle("Image preview failed: " + msg.err.Error())
+		} else {
+			m.messages.SetTitle("Messages")
 		}
 	case realtimeConnectedMsg:
 		if msg.err != nil {
@@ -816,11 +808,7 @@ func (m *Model) loadThread(conversation slack.Conversation, timestamp string) tv
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		messages, _, err := m.client.ConversationReplies(ctx, conversation.ID, timestamp, 100)
-		var previews map[string][]styledtext.Line
-		if err == nil {
-			previews = m.loadImagePreviews(ctx, messages)
-		}
-		return threadLoadedMsg{conversation: conversation, timestamp: timestamp, messages: messages, previews: previews, err: err}
+		return threadLoadedMsg{conversation: conversation, timestamp: timestamp, messages: messages, err: err}
 	}
 }
 
@@ -889,9 +877,6 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 				label = "image"
 			}
 			root.AddChild(tree.NewNode("  [" + label + "] " + name + " — open").SetReference(fileReference{file: file}))
-			for _, previewLine := range m.imagePreviews[file.ID] {
-				root.AddChild(tree.NewNode("").SetLine(previewLine).SetSelectable(false))
-			}
 		}
 		if len(message.Reactions) > 0 {
 			root.AddChild(tree.NewNode("  " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
@@ -912,11 +897,7 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 	if latestNode != nil {
 		m.messages.SetCurrentNode(latestNode)
 	}
-	if thread {
-		m.messages.SetTitle("Thread in " + m.conversationTitle(conversation))
-	} else {
-		m.messages.SetTitle(m.conversationTitle(conversation))
-	}
+	m.messages.SetTitle("Messages")
 }
 
 func (m *Model) showThread(conversation slack.Conversation, messages []slack.Message) {
@@ -968,9 +949,6 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 				kind = "image"
 			}
 			root.AddChild(tree.NewNode("  [" + kind + "] " + fileName(file) + " — open").SetReference(fileReference{file: file}))
-			for _, previewLine := range m.imagePreviews[file.ID] {
-				root.AddChild(tree.NewNode("").SetLine(previewLine).SetSelectable(false))
-			}
 		}
 		if len(message.Reactions) > 0 {
 			root.AddChild(tree.NewNode("  " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
@@ -1351,6 +1329,9 @@ func (m *Model) downloadAndOpen(file slack.File) tview.Cmd {
 		if err := os.Rename(temporaryName, target); err != nil {
 			return fileOpenedMsg{err: err}
 		}
+		if strings.HasPrefix(file.Mimetype, "image/") {
+			return fileOpenedMsg{path: target, preview: true}
+		}
 		if err := openLocalFile(target); err != nil {
 			return fileOpenedMsg{path: target, err: err}
 		}
@@ -1389,6 +1370,52 @@ func openLocalFile(path string) error {
 		command = exec.Command("xdg-open", path)
 	}
 	return command.Start()
+}
+
+func showKittyImage(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("decode image: %w", err)
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		return fmt.Errorf("encode image for terminal: %w", err)
+	}
+	width, height, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || width < 10 || height < 6 {
+		width, height = 80, 24
+	}
+	columns, rows := max(1, width-4), max(1, height-3)
+	fmt.Fprint(os.Stdout, "\x1b[2J\x1b[H")
+	_, _ = os.Stdout.Write(kittyImagePayload(encoded.Bytes(), columns, rows))
+	fmt.Fprintf(os.Stdout, "\x1b[%d;1HPress Enter to return to Slacker…", height)
+	_, readErr := bufio.NewReader(os.Stdin).ReadString('\n')
+	fmt.Fprint(os.Stdout, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[2J\x1b[H")
+	return readErr
+}
+
+func kittyImagePayload(pngData []byte, columns, rows int) []byte {
+	payload := base64.StdEncoding.EncodeToString(pngData)
+	var output bytes.Buffer
+	for first := true; len(payload) > 0; first = false {
+		chunkSize := min(4096, len(payload))
+		chunk, rest := payload[:chunkSize], payload[chunkSize:]
+		more := 0
+		if len(rest) > 0 {
+			more = 1
+		}
+		if first {
+			fmt.Fprintf(&output, "\x1b_Ga=T,f=100,q=2,c=%d,r=%d,m=%d;%s\x1b\\", columns, rows, more, chunk)
+		} else {
+			fmt.Fprintf(&output, "\x1b_Gq=2,m=%d;%s\x1b\\", more, chunk)
+		}
+		payload = rest
+	}
+	return output.Bytes()
 }
 
 func (m *Model) loadProfileDetails(userID string) tview.Cmd {
@@ -1543,68 +1570,8 @@ func (m *Model) loadHistory(conversation slack.Conversation) tview.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		messages, hasMore, err := m.client.ConversationHistory(ctx, conversation.ID, 100)
-		var previews map[string][]styledtext.Line
-		if err == nil {
-			previews = m.loadImagePreviews(ctx, messages)
-		}
-		return historyLoadedMsg{conversation: conversation, messages: messages, previews: previews, hasMore: hasMore, err: err}
+		return historyLoadedMsg{conversation: conversation, messages: messages, hasMore: hasMore, err: err}
 	}
-}
-
-func (m *Model) loadImagePreviews(ctx context.Context, messages []slack.Message) map[string][]styledtext.Line {
-	previews := make(map[string][]styledtext.Line)
-	for _, message := range messages {
-		for _, file := range message.Files {
-			if len(previews) >= 4 || file.ID == "" || !strings.HasPrefix(file.Mimetype, "image/") {
-				continue
-			}
-			target := file.URLPrivateDownload
-			if target == "" {
-				target = file.URLPrivate
-			}
-			if target == "" {
-				continue
-			}
-			var data bytes.Buffer
-			const maximumPreviewBytes = 12 * 1024 * 1024
-			writer := &cappedWriter{w: &data, remaining: maximumPreviewBytes}
-			if err := m.client.Download(ctx, target, writer); err != nil {
-				continue
-			}
-			if preview, err := renderImagePreview(data.Bytes(), 28, 8); err == nil {
-				previews[file.ID] = preview
-			}
-		}
-	}
-	return previews
-}
-
-func renderImagePreview(data []byte, width, rows int) ([]styledtext.Line, error) {
-	img, _, err := image.Decode(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	bounds := img.Bounds()
-	if bounds.Dx() == 0 || bounds.Dy() == 0 || width < 1 || rows < 1 {
-		return nil, fmt.Errorf("invalid image preview dimensions")
-	}
-	lines := make([]styledtext.Line, rows)
-	for row := 0; row < rows; row++ {
-		line := styledtext.Line{styledtext.NewSegment("  ", tcell.StyleDefault)}
-		for column := 0; column < width; column++ {
-			x := bounds.Min.X + column*bounds.Dx()/width
-			topY := bounds.Min.Y + (row*2)*bounds.Dy()/(rows*2)
-			bottomY := bounds.Min.Y + (row*2+1)*bounds.Dy()/(rows*2)
-			tr, tg, tb, _ := img.At(x, topY).RGBA()
-			br, bg, bb, _ := img.At(x, bottomY).RGBA()
-			style := tcell.StyleDefault.
-				Foreground(tcell.NewRGBColor(int32(tr>>8), int32(tg>>8), int32(tb>>8))).
-				Background(tcell.NewRGBColor(int32(br>>8), int32(bg>>8), int32(bb>>8)))
-			line = append(line, styledtext.NewSegment("▀", style))
-		}
-		lines[row] = line
-	}
-	return lines, nil
 }
 
 func (m *Model) openDM(userID string) tview.Cmd {
