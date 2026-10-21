@@ -492,7 +492,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 					return m.updateMessage(*m.editing, text)
 				}
 				m.composer.SetTitle("Sending…")
-				return m.sendMessage(conversation, text, m.activeThread)
+				return m.sendMessage(conversation, text, "")
 			}
 		}
 	case tree.SelectedMsg:

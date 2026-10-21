@@ -2,6 +2,9 @@ package root
 
 import (
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -242,6 +245,40 @@ func TestEnterInComposerDispatchesMessageSend(t *testing.T) {
 	}
 	if got := m.composer.Title(); got != "Sending…" {
 		t.Fatalf("composer title = %q", got)
+	}
+}
+
+func TestMainComposerNeverSendsIntoOpenThread(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.Form.Get("thread_ts"); got != "" {
+			t.Errorf("main composer sent thread_ts %q", got)
+		}
+		io.WriteString(w, `{"ok":true,"channel":"C1","ts":"200.000001","message":{"text":"channel message","ts":"200.000001"}}`)
+	}))
+	defer server.Close()
+	client, err := slack.NewClient(slack.Session{Token: "xoxc-test", Cookie: "xoxd-test", APIURL: server.URL + "/api/"}, slack.WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation := slack.Conversation{ID: "C1", Name: "general", IsChannel: true}
+	m := NewModel(&config.Config{}, "Team", "U1", []slack.Conversation{conversation}, nil, nil, nil, nil, client)
+	m.activeConversation = conversation.ID
+	m.activeThread = "100.000001"
+	m.composer.SetDisabled(false)
+	m.composer.SetText("channel message", true)
+	m.main.SetFocus(mainMessagesIndex)
+	m.right.SetFocus(rightComposerIndex)
+
+	cmd := m.Update(tcell.NewEventKey(tcell.KeyEnter, "", tcell.ModNone))
+	if cmd == nil {
+		t.Fatal("Enter in the main composer did not dispatch a send")
+	}
+	result, ok := cmd().(messageSentMsg)
+	if !ok || result.err != nil || result.thread != "" {
+		t.Fatalf("send result = %#v", result)
 	}
 }
 
