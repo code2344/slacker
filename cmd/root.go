@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/ayn2op/tview"
 	"github.com/code2344/slacker/internal/browserlogin"
 	"github.com/code2344/slacker/internal/config"
+	"github.com/code2344/slacker/internal/consts"
 	"github.com/code2344/slacker/internal/logger"
 	"github.com/code2344/slacker/internal/slack"
 	"github.com/code2344/slacker/internal/slackdesktop"
@@ -787,7 +789,7 @@ func runTUI(cfg *config.Config) error {
 	if _, ok := users[auth.UserID]; !ok {
 		users[auth.UserID] = slack.User{ID: auth.UserID, Name: auth.User, RealName: auth.User}
 	}
-	conversations = loadRecentDMActivity(ctx, client, conversations, 0)
+	conversations = loadRecentDMActivity(ctx, client, conversations, meta.TeamID, 0)
 	loadRecentDMUsers(ctx, client, conversations, users, 64)
 	profileFields, _ := client.TeamProfile(ctx)
 	counts, _ := client.ConversationCounts(ctx)
@@ -806,7 +808,26 @@ func runTUI(cfg *config.Config) error {
 	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, auth.UserID, conversations, sections, users, profileFields, counts, client), tview.WithScreen(screen)).Run()
 }
 
-func loadRecentDMActivity(ctx context.Context, client *slack.Client, conversations []slack.Conversation, limit int) []slack.Conversation {
+type dmActivityCache struct {
+	UpdatedAt time.Time         `json:"updated_at"`
+	Latest    map[string]string `json:"latest"`
+}
+
+const dmActivityCacheTTL = 2 * time.Minute
+
+func loadRecentDMActivity(ctx context.Context, client *slack.Client, conversations []slack.Conversation, teamID string, limit int) []slack.Conversation {
+	cachePath := filepath.Join(consts.CacheDir(), "dm-activity-"+teamID+".json")
+	cache, cacheFresh := readDMActivityCache(cachePath, time.Now())
+	for index := range conversations {
+		if latest, ok := cache.Latest[conversations[index].ID]; ok {
+			conversations[index].ActivityChecked = true
+			conversations[index].LatestMessageTS = latest
+		}
+	}
+	if cacheFresh {
+		return conversations
+	}
+
 	indices := make([]int, 0)
 	for index, conversation := range conversations {
 		if conversation.IsIM || conversation.IsMPIM {
@@ -847,7 +868,37 @@ func loadRecentDMActivity(ctx context.Context, client *slack.Client, conversatio
 		}(index)
 	}
 	wg.Wait()
+	latest := make(map[string]string, len(indices))
+	for _, index := range indices {
+		if conversations[index].ActivityChecked {
+			latest[conversations[index].ID] = conversations[index].LatestMessageTS
+		}
+	}
+	writeDMActivityCache(cachePath, dmActivityCache{UpdatedAt: time.Now(), Latest: latest})
 	return conversations
+}
+
+func readDMActivityCache(path string, now time.Time) (dmActivityCache, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return dmActivityCache{Latest: map[string]string{}}, false
+	}
+	var cache dmActivityCache
+	if json.Unmarshal(data, &cache) != nil || cache.Latest == nil {
+		return dmActivityCache{Latest: map[string]string{}}, false
+	}
+	return cache, !cache.UpdatedAt.IsZero() && now.Sub(cache.UpdatedAt) >= 0 && now.Sub(cache.UpdatedAt) < dmActivityCacheTTL
+}
+
+func writeDMActivityCache(path string, cache dmActivityCache) {
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return
+	}
+	temporary := path + ".tmp"
+	if os.WriteFile(temporary, data, 0600) == nil {
+		_ = os.Rename(temporary, path)
+	}
 }
 
 func loadRecentDMUsers(ctx context.Context, client *slack.Client, conversations []slack.Conversation, users map[string]slack.User, limit int) {

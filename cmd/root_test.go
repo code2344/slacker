@@ -5,10 +5,26 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/code2344/slacker/internal/slack"
 )
+
+func TestDMActivityCacheFreshness(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dm-activity.json")
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	writeDMActivityCache(path, dmActivityCache{UpdatedAt: now, Latest: map[string]string{"D1": "123.45", "D2": ""}})
+
+	cache, fresh := readDMActivityCache(path, now.Add(time.Minute))
+	if !fresh || cache.Latest["D1"] != "123.45" {
+		t.Fatalf("fresh cache = %#v, fresh=%v", cache, fresh)
+	}
+	if _, fresh = readDMActivityCache(path, now.Add(3*time.Minute)); fresh {
+		t.Fatal("expired DM activity cache reported fresh")
+	}
+}
 
 func TestListAllConversationsFollowsCursor(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
