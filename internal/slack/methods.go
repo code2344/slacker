@@ -199,19 +199,65 @@ func (c *Client) ListConversations(ctx context.Context, cursor string, limit int
 }
 
 type User struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	RealName string `json:"real_name"`
-	Deleted  bool   `json:"deleted"`
-	Profile  struct {
-		DisplayName string `json:"display_name"`
-		RealName    string `json:"real_name"`
-		Pronouns    string `json:"pronouns"`
-		Title       string `json:"title"`
-		StatusText  string `json:"status_text"`
-		StatusEmoji string `json:"status_emoji"`
-		Image48     string `json:"image_48"`
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	RealName          string `json:"real_name"`
+	Deleted           bool   `json:"deleted"`
+	TZ                string `json:"tz"`
+	TZLabel           string `json:"tz_label"`
+	TZOffset          int    `json:"tz_offset"`
+	IsBot             bool   `json:"is_bot"`
+	IsAdmin           bool   `json:"is_admin"`
+	IsOwner           bool   `json:"is_owner"`
+	IsPrimaryOwner    bool   `json:"is_primary_owner"`
+	IsRestricted      bool   `json:"is_restricted"`
+	IsUltraRestricted bool   `json:"is_ultra_restricted"`
+	ProfileLoaded     bool   `json:"-"`
+	Profile           struct {
+		DisplayName      string                           `json:"display_name"`
+		RealName         string                           `json:"real_name"`
+		FirstName        string                           `json:"first_name"`
+		LastName         string                           `json:"last_name"`
+		Pronouns         string                           `json:"pronouns"`
+		Title            string                           `json:"title"`
+		Email            string                           `json:"email"`
+		Phone            string                           `json:"phone"`
+		Skype            string                           `json:"skype"`
+		StatusText       string                           `json:"status_text"`
+		StatusEmoji      string                           `json:"status_emoji"`
+		StatusExpiration int64                            `json:"status_expiration"`
+		StartDate        string                           `json:"start_date"`
+		OOOMessage       string                           `json:"ooo_message"`
+		Image48          string                           `json:"image_48"`
+		Image192         string                           `json:"image_192"`
+		Image512         string                           `json:"image_512"`
+		ImageOriginal    string                           `json:"image_original"`
+		Fields           map[string]UserProfileFieldValue `json:"fields"`
 	} `json:"profile"`
+}
+
+type UserProfileFieldValue struct {
+	Value string `json:"value"`
+	Alt   string `json:"alt"`
+}
+
+type TeamProfileField struct {
+	ID        string `json:"id"`
+	Ordering  int    `json:"ordering"`
+	FieldName string `json:"field_name"`
+	Label     string `json:"label"`
+	Hint      string `json:"hint"`
+	Type      string `json:"type"`
+}
+
+func (c *Client) TeamProfile(ctx context.Context) ([]TeamProfileField, error) {
+	var result struct {
+		Profile struct {
+			Fields []TeamProfileField `json:"fields"`
+		} `json:"profile"`
+	}
+	err := c.Call(ctx, "team.profile.get", nil, &result)
+	return result.Profile.Fields, err
 }
 
 type UserBoot struct {
@@ -226,12 +272,46 @@ func (c *Client) UserInfo(ctx context.Context, userID string) (User, error) {
 		User User `json:"user"`
 	}
 	err := c.Call(ctx, "users.info", url.Values{"user": {userID}}, &result)
+	if err == nil {
+		result.User.ProfileLoaded = true
+	}
 	return result.User, err
+}
+
+type UserPresence struct {
+	Presence     string `json:"presence"`
+	Online       bool   `json:"online"`
+	AutoAway     bool   `json:"auto_away"`
+	ManualAway   bool   `json:"manual_away"`
+	LastActivity int64  `json:"last_activity"`
+}
+
+func (c *Client) UserPresence(ctx context.Context, userID string) (UserPresence, error) {
+	var result UserPresence
+	err := c.Call(ctx, "users.getPresence", url.Values{"user": {userID}}, &result)
+	return result, err
+}
+
+type DNDInfo struct {
+	DNDEnabled    bool  `json:"dnd_enabled"`
+	SnoozeEnabled bool  `json:"snooze_enabled"`
+	SnoozeEndtime int64 `json:"snooze_endtime"`
+	NextDNDStart  int64 `json:"next_dnd_start_ts"`
+	NextDNDEnd    int64 `json:"next_dnd_end_ts"`
+}
+
+func (c *Client) DNDInfo(ctx context.Context, userID string) (DNDInfo, error) {
+	var result DNDInfo
+	err := c.Call(ctx, "dnd.info", url.Values{"user": {userID}}, &result)
+	return result, err
 }
 
 func (c *Client) UserBoot(ctx context.Context) (UserBoot, error) {
 	var result UserBoot
 	err := c.Call(ctx, "client.userBoot", url.Values{"return_all_relevant_mpdms": {"true"}}, &result)
+	for index := range result.Members {
+		result.Members[index].ProfileLoaded = true
+	}
 	return result, err
 }
 
@@ -281,5 +361,8 @@ func (c *Client) ListUsers(ctx context.Context, cursor string, limit int) ([]Use
 		} `json:"response_metadata"`
 	}
 	err := c.Call(ctx, "users.list", params, &result)
+	for index := range result.Members {
+		result.Members[index].ProfileLoaded = true
+	}
 	return result.Members, result.Metadata.NextCursor, err
 }

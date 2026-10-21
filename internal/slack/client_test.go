@@ -238,7 +238,7 @@ func TestUserInfo(t *testing.T) {
 		if r.Form.Get("user") != "U123" {
 			t.Errorf("user = %q", r.Form.Get("user"))
 		}
-		io.WriteString(w, `{"ok":true,"user":{"id":"U123","name":"ruben","profile":{"display_name":"Ruben"}}}`)
+		io.WriteString(w, `{"ok":true,"user":{"id":"U123","name":"ruben","tz":"Australia/Hobart","tz_offset":39600,"profile":{"display_name":"Ruben","real_name":"Ruben Sutton","email":"ruben@example.com","phone":"123","start_date":"2026-03-02","fields":{"X1":{"value":"Hobart","alt":""}}}}}`)
 	}))
 	defer server.Close()
 	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
@@ -246,8 +246,49 @@ func TestUserInfo(t *testing.T) {
 		t.Fatal(err)
 	}
 	user, err := client.UserInfo(context.Background(), "U123")
-	if err != nil || user.ID != "U123" || user.Profile.DisplayName != "Ruben" {
+	if err != nil || user.ID != "U123" || user.Profile.DisplayName != "Ruben" || user.Profile.Email != "ruben@example.com" || user.Profile.Fields["X1"].Value != "Hobart" || !user.ProfileLoaded {
 		t.Fatalf("user = %#v, err = %v", user, err)
+	}
+}
+
+func TestProfileSupportingMethods(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		switch r.URL.Path {
+		case "/api/team.profile.get":
+			io.WriteString(w, `{"ok":true,"profile":{"fields":[{"id":"X1","ordering":2,"label":"Location","type":"text"}]}}`)
+		case "/api/users.getPresence":
+			if r.Form.Get("user") != "U123" {
+				t.Errorf("presence user = %q", r.Form.Get("user"))
+			}
+			io.WriteString(w, `{"ok":true,"presence":"active","online":true}`)
+		case "/api/dnd.info":
+			if r.Form.Get("user") != "U123" {
+				t.Errorf("dnd user = %q", r.Form.Get("user"))
+			}
+			io.WriteString(w, `{"ok":true,"dnd_enabled":true,"snooze_enabled":true,"snooze_endtime":1710000000}`)
+		default:
+			t.Errorf("path = %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, err := client.TeamProfile(context.Background())
+	if err != nil || len(fields) != 1 || fields[0].Label != "Location" {
+		t.Fatalf("fields = %#v, err = %v", fields, err)
+	}
+	presence, err := client.UserPresence(context.Background(), "U123")
+	if err != nil || presence.Presence != "active" || !presence.Online {
+		t.Fatalf("presence = %#v, err = %v", presence, err)
+	}
+	dnd, err := client.DNDInfo(context.Background(), "U123")
+	if err != nil || !dnd.SnoozeEnabled {
+		t.Fatalf("dnd = %#v, err = %v", dnd, err)
 	}
 }
 

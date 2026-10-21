@@ -32,18 +32,10 @@ func TestOrderSectionsFollowsSlackLinkedOrder(t *testing.T) {
 }
 
 func TestRenderSlackTextResolvesEntitiesAndFormatting(t *testing.T) {
+	user := slack.User{ID: "U123"}
+	user.Profile.DisplayName = "Ruben"
 	m := &Model{
-		users: map[string]slack.User{
-			"U123": {ID: "U123", Profile: struct {
-				DisplayName string `json:"display_name"`
-				RealName    string `json:"real_name"`
-				Pronouns    string `json:"pronouns"`
-				Title       string `json:"title"`
-				StatusText  string `json:"status_text"`
-				StatusEmoji string `json:"status_emoji"`
-				Image48     string `json:"image_48"`
-			}{DisplayName: "Ruben"}},
-		},
+		users:         map[string]slack.User{"U123": user},
 		conversations: map[string]slack.Conversation{"C123": {ID: "C123", Name: "general"}},
 	}
 	got := m.renderSlackText("Hi <@U123> in <#C123> — *bold* &amp; <https://example.com|a link>")
@@ -105,5 +97,26 @@ func TestFormatRelativeTimestamp(t *testing.T) {
 	now := time.Unix(1710000180, 0).Local()
 	if got := formatRelativeTimestamp("1710000000.0", now); got != "3 minutes ago" {
 		t.Fatalf("relative timestamp = %q", got)
+	}
+}
+
+func TestUnresolvedUserIDsIncludesPartialUsersOnce(t *testing.T) {
+	m := &Model{
+		users:       map[string]slack.User{"U1": {ID: "U1", Name: "partial"}},
+		userLookups: map[string]bool{},
+	}
+	messages := []slack.Message{{User: "U1"}, {User: "U2"}, {User: "U2"}}
+	if got := strings.Join(m.unresolvedUserIDs(messages), ","); got != "U1,U2" {
+		t.Fatalf("unresolved IDs = %q", got)
+	}
+	if got := m.unresolvedUserIDs(messages); len(got) != 0 {
+		t.Fatalf("second lookup returned %#v", got)
+	}
+}
+
+func TestProfileRoles(t *testing.T) {
+	user := slack.User{IsAdmin: true, IsRestricted: true, IsBot: true}
+	if got := strings.Join(profileRoles(user), ","); got != "Admin,Guest,Bot" {
+		t.Fatalf("roles = %q", got)
 	}
 }

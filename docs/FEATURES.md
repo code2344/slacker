@@ -42,8 +42,8 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 
 ## People and presence
 
-- [~] Clickable profiles with display name, title, pronouns, and status
-- [ ] Presence, last seen, timezone/local time, and typing indicators
+- [x] Clickable profiles with names, title, pronouns, status, contact details, timezone/local time, roles, and custom workspace fields
+- [~] Presence, notification snooze, and last-activity data; typing indicators remain planned
 - [ ] Profile photos and profile editing
 - [ ] Set/clear status, availability, and notification pause
 - [ ] User groups and workspace directory

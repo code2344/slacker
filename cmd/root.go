@@ -784,6 +784,7 @@ func runTUI(cfg *config.Config) error {
 	if _, ok := users[auth.UserID]; !ok {
 		users[auth.UserID] = slack.User{ID: auth.UserID, Name: auth.User, RealName: auth.User}
 	}
+	profileFields, _ := client.TeamProfile(ctx)
 	counts, _ := client.ConversationCounts(ctx)
 	screen, err := tcell.NewScreen()
 	if err != nil {
@@ -797,7 +798,7 @@ func runTUI(cfg *config.Config) error {
 	}
 	screen.EnablePaste()
 	tview.Styles = tview.Theme{}
-	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, auth.UserID, conversations, sections, users, counts, client), tview.WithScreen(screen)).Run()
+	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, auth.UserID, conversations, sections, users, profileFields, counts, client), tview.WithScreen(screen)).Run()
 }
 
 func printUsage() {

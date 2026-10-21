@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ayn2op/tview"
@@ -38,6 +39,11 @@ type Model struct {
 	inspectorKind      string
 	client             *slack.Client
 	users              map[string]slack.User
+	profileFields      map[string]slack.TeamProfileField
+	userLookups        map[string]bool
+	presences          map[string]slack.UserPresence
+	dnd                map[string]slack.DNDInfo
+	profileLookups     map[string]bool
 	counts             map[string]slack.ConversationCount
 	conversations      map[string]slack.Conversation
 	activeConversation string
@@ -91,6 +97,16 @@ type userLoadedMsg struct {
 	user   slack.User
 	err    error
 }
+type authorsLoadedMsg struct {
+	users   map[string]slack.User
+	history *historyLoadedMsg
+	thread  *threadLoadedMsg
+}
+type profileDetailsLoadedMsg struct {
+	userID   string
+	presence slack.UserPresence
+	dnd      slack.DNDInfo
+}
 
 type realtimeConnectedMsg struct {
 	stream *slack.Realtime
@@ -101,7 +117,7 @@ type realtimeEventMsg struct {
 	err   error
 }
 
-func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversations []slack.Conversation, sections []slack.ChannelSection, users map[string]slack.User, counts map[string]slack.ConversationCount, client *slack.Client) *Model {
+func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversations []slack.Conversation, sections []slack.ChannelSection, users map[string]slack.User, profileFields []slack.TeamProfileField, counts map[string]slack.ConversationCount, client *slack.Client) *Model {
 	m := &Model{
 		Layers:         layers.New(),
 		cfg:            cfg,
@@ -117,8 +133,16 @@ func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversation
 		client:         client,
 		selfUserID:     selfUserID,
 		users:          users,
+		profileFields:  make(map[string]slack.TeamProfileField, len(profileFields)),
+		userLookups:    make(map[string]bool),
+		presences:      make(map[string]slack.UserPresence),
+		dnd:            make(map[string]slack.DNDInfo),
+		profileLookups: make(map[string]bool),
 		counts:         counts,
 		conversations:  make(map[string]slack.Conversation, len(conversations)),
+	}
+	for _, field := range profileFields {
+		m.profileFields[field.ID] = field
 	}
 	m.build(workspaceName, conversations, sections)
 	return m
@@ -378,6 +402,10 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.setMessageNotice("Could not load messages: " + msg.err.Error())
 			break
 		}
+		if userIDs := m.unresolvedUserIDs(msg.messages); len(userIDs) > 0 {
+			m.setMessageNotice("Resolving message authors…")
+			return m.loadAuthors(userIDs, &msg, nil)
+		}
 		m.activeThread = ""
 		m.showMessages(msg.conversation, msg.messages, msg.hasMore, false)
 		m.composer.SetDisabled(false)
@@ -434,6 +462,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.setMessageNotice("Could not load thread: " + msg.err.Error())
 			break
 		}
+		if userIDs := m.unresolvedUserIDs(msg.messages); len(userIDs) > 0 {
+			return m.loadAuthors(userIDs, nil, &msg)
+		}
 		m.activeThread = msg.timestamp
 		m.showThread(msg.conversation, msg.messages)
 		m.openInspector()
@@ -446,7 +477,24 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			msg.user.ID = msg.userID
 		}
 		m.users[msg.user.ID] = msg.user
-		m.showProfile(msg.user.ID)
+		return m.showProfile(msg.user.ID)
+	case authorsLoadedMsg:
+		for id, user := range msg.users {
+			if user.ID == "" {
+				user.ID = id
+			}
+			m.users[id] = user
+		}
+		if msg.history != nil {
+			return m.Update(*msg.history)
+		}
+		if msg.thread != nil {
+			return m.Update(*msg.thread)
+		}
+	case profileDetailsLoadedMsg:
+		m.presences[msg.userID] = msg.presence
+		m.dnd[msg.userID] = msg.dnd
+		return m.showProfile(msg.userID)
 	case realtimeConnectedMsg:
 		if msg.err != nil {
 			return m.reconnectRealtime()
@@ -837,7 +885,7 @@ func renderReactions(reactions []slack.Reaction, selfUserID string) string {
 
 func (m *Model) showProfile(userID string) tview.Cmd {
 	user, ok := m.users[userID]
-	if !ok {
+	if !ok || !user.ProfileLoaded {
 		root := tree.NewNode("")
 		root.AddChild(tree.NewNode("× Close profile").SetReference(inspectorCloseReference{}))
 		root.AddChild(tree.NewNode("Loading profile…").SetSelectable(false))
@@ -850,28 +898,167 @@ func (m *Model) showProfile(userID string) tview.Cmd {
 	}
 	root := tree.NewNode("")
 	root.AddChild(tree.NewNode("× Close profile").SetReference(inspectorCloseReference{}))
-	root.AddChild(tree.NewNode(displayName(user)).SetSelectable(false))
-	if user.Name != "" && user.Name != displayName(user) {
+	realName := user.Profile.RealName
+	if realName == "" {
+		realName = user.RealName
+	}
+	if realName == "" {
+		realName = displayName(user)
+	}
+	root.AddChild(tree.NewNode(realName).SetSelectable(false))
+	handle := displayName(user)
+	if handle != "" && handle != realName {
+		root.AddChild(tree.NewNode("@" + handle).SetSelectable(false))
+	} else if user.Name != "" && user.Name != realName {
 		root.AddChild(tree.NewNode("@" + user.Name).SetSelectable(false))
 	}
+	if user.Profile.Title != "" || user.Profile.Pronouns != "" {
+		summary := user.Profile.Title
+		if user.Profile.Pronouns != "" {
+			if summary != "" {
+				summary += "  ·  "
+			}
+			summary += user.Profile.Pronouns
+		}
+		root.AddChild(tree.NewNode(summary).SetSelectable(false))
+	}
 	if user.Profile.StatusEmoji != "" || user.Profile.StatusText != "" {
+		root.AddChild(tree.NewNode("").SetSelectable(false))
 		root.AddChild(tree.NewNode(strings.TrimSpace(user.Profile.StatusEmoji + " " + user.Profile.StatusText)).SetSelectable(false))
+		if user.Profile.StatusExpiration > 0 {
+			expires := time.Unix(user.Profile.StatusExpiration, 0).Local()
+			root.AddChild(tree.NewNode("Until " + expires.Format("Mon Jan 2, 3:04 PM")).SetSelectable(false))
+		}
 	}
-	if user.Profile.Title != "" {
-		root.AddChild(tree.NewNode(user.Profile.Title).SetSelectable(false))
+	if user.Profile.OOOMessage != "" {
+		root.AddChild(tree.NewNode("Out of office  " + user.Profile.OOOMessage).SetSelectable(false))
 	}
-	if user.Profile.Pronouns != "" {
-		root.AddChild(tree.NewNode("Pronouns  " + user.Profile.Pronouns).SetSelectable(false))
+	if presence, exists := m.presences[userID]; exists && presence.Presence != "" {
+		label := strings.Title(presence.Presence)
+		if presence.ManualAway {
+			label = "Away"
+		}
+		if presence.Presence == "away" && presence.LastActivity > 0 {
+			label += "  ·  last active " + formatRelativeTimestamp(fmt.Sprintf("%d.0", presence.LastActivity), time.Now())
+		}
+		if dnd := m.dnd[userID]; dnd.SnoozeEnabled || dnd.DNDEnabled {
+			label += "  ·  notifications snoozed"
+			if dnd.SnoozeEndtime > 0 {
+				label += " until " + time.Unix(dnd.SnoozeEndtime, 0).Local().Format("3:04 PM")
+			}
+		}
+		root.AddChild(tree.NewNode(label).SetSelectable(false))
+	}
+	if user.TZOffset != 0 || user.TZLabel != "" {
+		local := time.Now().UTC().Add(time.Duration(user.TZOffset) * time.Second).Format("3:04 PM")
+		label := "Local time  " + local
+		if user.TZLabel != "" {
+			label += "  ·  " + user.TZLabel
+		}
+		root.AddChild(tree.NewNode(label).SetSelectable(false))
+	}
+
+	contact := [][2]string{}
+	if user.Profile.Email != "" {
+		contact = append(contact, [2]string{"Email", user.Profile.Email})
+	}
+	if user.Profile.Phone != "" {
+		contact = append(contact, [2]string{"Phone", user.Profile.Phone})
+	}
+	if user.Profile.Skype != "" {
+		contact = append(contact, [2]string{"Skype", user.Profile.Skype})
+	}
+	addProfileSection(root, "Contact information", contact)
+
+	about := [][2]string{}
+	if user.Profile.StartDate != "" {
+		about = append(about, [2]string{"Start date", user.Profile.StartDate})
+	}
+	fields := make([]slack.TeamProfileField, 0, len(user.Profile.Fields))
+	for id := range user.Profile.Fields {
+		definition, exists := m.profileFields[id]
+		if !exists {
+			definition = slack.TeamProfileField{ID: id, Label: id, Ordering: 1 << 30}
+		}
+		fields = append(fields, definition)
+	}
+	sort.SliceStable(fields, func(i, j int) bool {
+		if fields[i].Ordering == fields[j].Ordering {
+			return fields[i].Label < fields[j].Label
+		}
+		return fields[i].Ordering < fields[j].Ordering
+	})
+	for _, definition := range fields {
+		field := user.Profile.Fields[definition.ID]
+		value := field.Value
+		if value == "" {
+			value = field.Alt
+		}
+		if value == "" {
+			continue
+		}
+		label := definition.Label
+		if label == "" {
+			label = definition.FieldName
+		}
+		about = append(about, [2]string{label, m.renderSlackText(value)})
+	}
+	addProfileSection(root, "About", about)
+
+	account := [][2]string{}
+	roles := profileRoles(user)
+	if len(roles) > 0 {
+		account = append(account, [2]string{"Role", strings.Join(roles, ", ")})
+	}
+	if user.TZ != "" {
+		account = append(account, [2]string{"Timezone", user.TZ})
 	}
 	if user.ID != "" {
-		root.AddChild(tree.NewNode("Member ID  " + user.ID).SetSelectable(false))
+		account = append(account, [2]string{"Member ID", user.ID})
 	}
+	addProfileSection(root, "Account", account)
 	m.profile.SetRoot(root).SetTopLevel(1).SetTitle("Profile")
 	m.activeThread = ""
 	m.inspector.Clear().SetDirection(flex.DirectionRow).AddItem(m.profile, 0, 1, true)
 	m.inspectorKind = "profile"
 	m.openInspector()
+	if !m.profileLookups[userID] {
+		m.profileLookups[userID] = true
+		return m.loadProfileDetails(userID)
+	}
 	return nil
+}
+
+func addProfileSection(root *tree.Node, heading string, rows [][2]string) {
+	if len(rows) == 0 {
+		return
+	}
+	root.AddChild(tree.NewNode("").SetSelectable(false))
+	root.AddChild(tree.NewNode(heading).SetSelectable(false))
+	for _, row := range rows {
+		root.AddChild(tree.NewNode(row[0] + "  " + row[1]).SetSelectable(false))
+	}
+}
+
+func profileRoles(user slack.User) []string {
+	var roles []string
+	switch {
+	case user.IsPrimaryOwner:
+		roles = append(roles, "Primary owner")
+	case user.IsOwner:
+		roles = append(roles, "Owner")
+	case user.IsAdmin:
+		roles = append(roles, "Admin")
+	}
+	if user.IsUltraRestricted {
+		roles = append(roles, "Single-channel guest")
+	} else if user.IsRestricted {
+		roles = append(roles, "Guest")
+	}
+	if user.IsBot {
+		roles = append(roles, "Bot")
+	}
+	return roles
 }
 
 func (m *Model) showProfileError(userID string, err error) {
@@ -887,6 +1074,73 @@ func (m *Model) loadUser(userID string) tview.Cmd {
 		defer cancel()
 		user, err := m.client.UserInfo(ctx, userID)
 		return userLoadedMsg{userID: userID, user: user, err: err}
+	}
+}
+
+func (m *Model) loadProfileDetails(userID string) tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		var presence slack.UserPresence
+		var dnd slack.DNDInfo
+		var group sync.WaitGroup
+		group.Add(2)
+		go func() {
+			defer group.Done()
+			presence, _ = m.client.UserPresence(ctx, userID)
+		}()
+		go func() {
+			defer group.Done()
+			dnd, _ = m.client.DNDInfo(ctx, userID)
+		}()
+		group.Wait()
+		return profileDetailsLoadedMsg{userID: userID, presence: presence, dnd: dnd}
+	}
+}
+
+func (m *Model) unresolvedUserIDs(messages []slack.Message) []string {
+	seen := make(map[string]bool)
+	var ids []string
+	for _, message := range messages {
+		id := message.User
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if user, exists := m.users[id]; (exists && user.ProfileLoaded) || m.userLookups[id] {
+			continue
+		}
+		m.userLookups[id] = true
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (m *Model) loadAuthors(userIDs []string, history *historyLoadedMsg, thread *threadLoadedMsg) tview.Cmd {
+	return func() tview.Msg {
+		users := make(map[string]slack.User, len(userIDs))
+		var mu sync.Mutex
+		semaphore := make(chan struct{}, 6)
+		var group sync.WaitGroup
+		for _, id := range userIDs {
+			group.Add(1)
+			go func(userID string) {
+				defer group.Done()
+				semaphore <- struct{}{}
+				defer func() { <-semaphore }()
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				user, err := m.client.UserInfo(ctx, userID)
+				if err != nil {
+					return
+				}
+				mu.Lock()
+				users[userID] = user
+				mu.Unlock()
+			}(id)
+		}
+		group.Wait()
+		return authorsLoadedMsg{users: users, history: history, thread: thread}
 	}
 }
 
