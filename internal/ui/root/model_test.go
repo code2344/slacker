@@ -48,6 +48,33 @@ func TestRenderSlackTextResolvesEntitiesAndFormatting(t *testing.T) {
 	}
 }
 
+func TestRenderMrkdwnLineAppliesInlineStyles(t *testing.T) {
+	line := renderMrkdwnLine("  ", "*bold* _italic_ ~gone~ `code`", true)
+	if len(line) != 9 {
+		t.Fatalf("segments = %#v", line)
+	}
+	if !line[1].Style.HasBold() || !line[3].Style.HasItalic() || !line[5].Style.HasStrikeThrough() {
+		t.Fatalf("mrkdwn styles were not applied: %#v", line)
+	}
+	if !line[7].Style.HasReverse() {
+		t.Fatalf("code style = %#v", line[7].Style)
+	}
+	if !line[8].Style.HasItalic() || line[8].Text != "  (edited)" {
+		t.Fatalf("edited segment = %#v", line[8])
+	}
+}
+
+func TestRenderMrkdwnBlocksAndQuotes(t *testing.T) {
+	value := prepareMrkdwn("> quoted\nnormal\n>>> long\ncontinued")
+	if value != "│ quoted ↵ normal ↵ │ long ↵ │ continued" {
+		t.Fatalf("prepared block text = %q", value)
+	}
+	line := renderMrkdwnLine("", "```code```", false)
+	if len(line) != 2 || line[1].Text != "code" || !line[1].Style.HasReverse() {
+		t.Fatalf("code block = %#v", line)
+	}
+}
+
 func TestConversationTitleUsesDMDisplayName(t *testing.T) {
 	user := slack.User{ID: "U123", Name: "ruben"}
 	user.Profile.DisplayName = "Ruben Sutton"

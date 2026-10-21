@@ -2,10 +2,12 @@ package slack
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type Auth struct {
@@ -185,15 +187,39 @@ func (c *Client) ConversationReplies(ctx context.Context, channel, timestamp str
 }
 
 func (c *Client) PostMessage(ctx context.Context, channel, text, threadTimestamp string) (Message, error) {
-	params := url.Values{"channel": {channel}, "text": {text}}
+	params := url.Values{"channel": {channel}, "text": {text}, "mrkdwn": {"true"}, "client_msg_id": {newClientMessageID()}}
 	if threadTimestamp != "" {
 		params.Set("thread_ts", threadTimestamp)
 	}
 	var result struct {
+		Channel string  `json:"channel"`
+		TS      string  `json:"ts"`
 		Message Message `json:"message"`
 	}
 	err := c.Call(ctx, "chat.postMessage", params, &result)
+	if err != nil {
+		return Message{}, err
+	}
+	if result.Message.Timestamp == "" {
+		result.Message.Timestamp = result.TS
+	}
+	if result.Message.Timestamp == "" {
+		return Message{}, fmt.Errorf("Slack accepted chat.postMessage but returned no message timestamp")
+	}
+	if result.Channel != "" && result.Channel != channel {
+		return Message{}, fmt.Errorf("Slack posted to unexpected conversation %s", result.Channel)
+	}
 	return result.Message, err
+}
+
+func newClientMessageID() string {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return fmt.Sprintf("slacker-%d", time.Now().UnixNano())
+	}
+	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", value[0:4], value[4:6], value[6:8], value[8:10], value[10:16])
 }
 
 type MessageSearchMatch struct {

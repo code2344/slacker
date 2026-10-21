@@ -107,7 +107,7 @@ func TestPostMessage(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatal(err)
 		}
-		if r.Form.Get("channel") != "C123" || r.Form.Get("text") != "hello" {
+		if r.Form.Get("channel") != "C123" || r.Form.Get("text") != "hello" || r.Form.Get("mrkdwn") != "true" || r.Form.Get("client_msg_id") == "" {
 			t.Errorf("form = %#v", r.Form)
 		}
 		io.WriteString(w, `{"ok":true,"message":{"user":"U1","text":"hello","ts":"1710000000.1"}}`)
@@ -138,7 +138,7 @@ func TestConversationRepliesAndThreadReply(t *testing.T) {
 			if r.Form.Get("thread_ts") != "1710000000.1" {
 				t.Errorf("post form = %#v", r.Form)
 			}
-			io.WriteString(w, `{"ok":true,"message":{"text":"new reply","thread_ts":"1710000000.1"}}`)
+			io.WriteString(w, `{"ok":true,"message":{"text":"new reply","ts":"1710000001.1","thread_ts":"1710000000.1"}}`)
 		default:
 			t.Errorf("path = %q", r.URL.Path)
 		}

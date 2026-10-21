@@ -915,23 +915,15 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 			authorKey = message.Username
 		}
 		compact := previousAuthor != "" && authorKey == previousAuthor && !previousTime.IsZero() && !messageTime.IsZero() && messageTime.Sub(previousTime) <= 5*time.Minute
-		text := strings.ReplaceAll(m.renderSlackText(message.Text), "\n", " ↵ ")
+		text := prepareMrkdwn(m.resolveSlackEntities(message.Text))
 		when := formatRelativeTimestamp(message.Timestamp, now)
 		reference := messageReference{conversation: conversation, message: message}
 		if compact {
-			line := fmt.Sprintf("  %-14s  %s", when, text)
-			if message.Edited != nil {
-				line += "  (edited)"
-			}
-			latestNode = tree.NewNode(line).SetReference(reference).SetExpanded(true)
+			latestNode = tree.NewNode("").SetLine(renderMrkdwnLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
 			root.AddChild(latestNode)
 		} else {
 			root.AddChild(tree.NewNode(fmt.Sprintf("@%s  %s", author, when)).SetReference(messageProfileReference{messageReference: reference}))
-			line := "  " + text
-			if message.Edited != nil {
-				line += "  (edited)"
-			}
-			latestNode = tree.NewNode(line).SetReference(reference).SetExpanded(true)
+			latestNode = tree.NewNode("").SetLine(renderMrkdwnLine("  ", text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
 			root.AddChild(latestNode)
 		}
 		for _, file := range message.Files {
@@ -997,22 +989,14 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 		}
 		compact := previousAuthor != "" && authorKey == previousAuthor && !previousTime.IsZero() && !messageTime.IsZero() && messageTime.Sub(previousTime) <= 5*time.Minute
 		when := formatRelativeTimestamp(message.Timestamp, now)
-		text := strings.ReplaceAll(m.renderSlackText(message.Text), "\n", " ↵ ")
+		text := prepareMrkdwn(m.resolveSlackEntities(message.Text))
 		reference := messageReference{conversation: conversation, message: message, contextThread: m.activeThread}
 		if compact {
-			line := fmt.Sprintf("  %-14s  %s", when, text)
-			if message.Edited != nil {
-				line += "  (edited)"
-			}
-			latestNode = tree.NewNode(line).SetReference(reference).SetExpanded(true)
+			latestNode = tree.NewNode("").SetLine(renderMrkdwnLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
 			root.AddChild(latestNode)
 		} else {
 			root.AddChild(tree.NewNode(fmt.Sprintf("@%s  %s", author, when)).SetReference(messageProfileReference{messageReference: reference}))
-			line := "  " + text
-			if message.Edited != nil {
-				line += "  (edited)"
-			}
-			latestNode = tree.NewNode(line).SetReference(reference).SetExpanded(true)
+			latestNode = tree.NewNode("").SetLine(renderMrkdwnLine("  ", text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
 			root.AddChild(latestNode)
 		}
 		for _, file := range message.Files {
@@ -1048,6 +1032,14 @@ var slackFormatPatterns = []*regexp.Regexp{
 }
 
 func (m *Model) renderSlackText(value string) string {
+	value = m.resolveSlackEntities(value)
+	for _, pattern := range slackFormatPatterns {
+		value = pattern.ReplaceAllString(value, "$1")
+	}
+	return value
+}
+
+func (m *Model) resolveSlackEntities(value string) string {
 	value = slackEntityPattern.ReplaceAllStringFunc(value, func(entity string) string {
 		parts := slackEntityPattern.FindStringSubmatch(entity)
 		kind, id, label := parts[1], parts[2], parts[3]
@@ -1066,6 +1058,15 @@ func (m *Model) renderSlackText(value string) string {
 			}
 			return "#" + id
 		case "!":
+			if strings.HasPrefix(id, "date^") {
+				if label != "" {
+					return label
+				}
+				return "date"
+			}
+			if id == "channel" || id == "everyone" || id == "here" {
+				return "@" + id
+			}
 			if label != "" {
 				return "@" + label
 			}
@@ -1077,11 +1078,82 @@ func (m *Model) renderSlackText(value string) string {
 			return id
 		}
 	})
-	value = html.UnescapeString(value)
-	for _, pattern := range slackFormatPatterns {
-		value = pattern.ReplaceAllString(value, "$1")
+	return html.UnescapeString(value)
+}
+
+func renderMrkdwnLine(prefix, value string, edited bool) styledtext.Line {
+	line := styledtext.Line{styledtext.NewSegment(prefix, tcell.StyleDefault)}
+	line = append(line, parseMrkdwnSegments(value, tcell.StyleDefault)...)
+	if edited {
+		line = append(line, styledtext.NewSegment("  (edited)", tcell.StyleDefault.Italic(true)))
 	}
-	return value
+	return line
+}
+
+func prepareMrkdwn(value string) string {
+	lines := strings.Split(value, "\n")
+	for index, line := range lines {
+		if strings.HasPrefix(line, ">>>") {
+			lines[index] = "│ " + strings.TrimSpace(strings.TrimPrefix(line, ">>>"))
+			for following := index + 1; following < len(lines); following++ {
+				lines[following] = "│ " + lines[following]
+			}
+			break
+		}
+		if strings.HasPrefix(line, ">") {
+			lines[index] = "│ " + strings.TrimSpace(strings.TrimPrefix(line, ">"))
+		}
+	}
+	return strings.Join(lines, " ↵ ")
+}
+
+func parseMrkdwnSegments(value string, style tcell.Style) styledtext.Line {
+	var line styledtext.Line
+	for len(value) > 0 {
+		if strings.HasPrefix(value, "```") {
+			end := strings.Index(value[3:], "```")
+			if end < 0 {
+				line = append(line, styledtext.NewSegment(value, style.Reverse(true)))
+				break
+			}
+			end += 3
+			line = append(line, styledtext.NewSegment(value[3:end], style.Reverse(true)))
+			value = value[end+3:]
+			continue
+		}
+		index := strings.IndexAny(value, "*_~`")
+		if index < 0 {
+			line = append(line, styledtext.NewSegment(value, style))
+			break
+		}
+		if index > 0 {
+			line = append(line, styledtext.NewSegment(value[:index], style))
+			value = value[index:]
+		}
+		marker := value[0]
+		end := strings.IndexByte(value[1:], marker)
+		if end < 0 {
+			line = append(line, styledtext.NewSegment(value[:1], style))
+			value = value[1:]
+			continue
+		}
+		end++
+		inner := value[1:end]
+		innerStyle := style
+		switch marker {
+		case '*':
+			innerStyle = innerStyle.Bold(true)
+		case '_':
+			innerStyle = innerStyle.Italic(true)
+		case '~':
+			innerStyle = innerStyle.StrikeThrough(true)
+		case '`':
+			innerStyle = innerStyle.Reverse(true)
+		}
+		line = append(line, parseMrkdwnSegments(inner, innerStyle)...)
+		value = value[end+1:]
+	}
+	return line
 }
 
 func renderReactions(reactions []slack.Reaction, selfUserID string) string {
