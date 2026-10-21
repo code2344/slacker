@@ -23,9 +23,9 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 ## Messages
 
 - [x] Plain-text channel messages and replies
-- [~] Slack mrkdwn display
+- [x] Slack mrkdwn display for emphasis, strike, inline/fenced code, quotes, links, mentions, channels, dates, and entities
 - [x] Edit and delete your own messages
-- [ ] Rich composer: bold, italic, strike, code, quotes, lists, and links
+- [~] Rich composer: Slack mrkdwn is sent correctly; formatting toolbar and autocomplete remain planned
 - [ ] Mentions and channel/user/emoji autocomplete
 - [ ] Scheduled messages and drafts
 - [ ] Forward/share messages and copy permalinks
@@ -38,7 +38,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Display reaction names, counts, and whether you reacted
 - [x] Add common reactions and remove your own reactions
 - [ ] Full emoji picker and reacting-user list
-- [ ] Workspace emoji, aliases, skin tones, and emoji picker
+- [~] Standard Unicode emoji aliases render inline; workspace emoji, aliases, skin tones, and picker remain planned
 
 ## People and presence
 
@@ -98,4 +98,4 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] CI and release packaging foundation
 - [ ] Homebrew, APT, RPM, AUR, Nix, Scoop, WinGet, and FreeBSD publication
 - [ ] Shell completion, man pages, update checking, and diagnostics bundle
-- [ ] Local cache for instant startup, offline history, and reduced API traffic
+- [~] Local cache for images and DM activity; offline message history remains planned

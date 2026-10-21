@@ -32,6 +32,7 @@ import (
 	"github.com/code2344/slacker/internal/slack"
 	"github.com/code2344/slacker/internal/ui"
 	"github.com/gdamore/tcell/v3"
+	"github.com/kyokomi/emoji/v2"
 )
 
 // Model is the first Slack-backed shell of the three-pane interface.
@@ -1024,18 +1025,18 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 }
 
 var slackEntityPattern = regexp.MustCompile(`<([@#!]?)([^>|]+)(?:\|([^>]+))?>`)
-var slackFormatPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`\*([^*\n]+)\*`),
-	regexp.MustCompile(`_([^_\n]+)_`),
-	regexp.MustCompile(`~([^~\n]+)~`),
-	regexp.MustCompile("`([^`\\n]+)`"),
-}
+var emojiAliasPattern = regexp.MustCompile(`:[[:alnum:]_+\-]+:`)
+var slackBoldPattern = regexp.MustCompile(`\*([^*\n]+)\*`)
+var slackItalicPattern = regexp.MustCompile(`(^|[\s(])_([^_\n]+)_($|[\s).,!?:])`)
+var slackStrikePattern = regexp.MustCompile(`~([^~\n]+)~`)
+var slackCodePattern = regexp.MustCompile("`([^`\\n]+)`")
 
 func (m *Model) renderSlackText(value string) string {
 	value = m.resolveSlackEntities(value)
-	for _, pattern := range slackFormatPatterns {
-		value = pattern.ReplaceAllString(value, "$1")
-	}
+	value = slackBoldPattern.ReplaceAllString(value, "$1")
+	value = slackItalicPattern.ReplaceAllString(value, "$1$2$3")
+	value = slackStrikePattern.ReplaceAllString(value, "$1")
+	value = slackCodePattern.ReplaceAllString(value, "$1")
 	return value
 }
 
@@ -1078,7 +1079,20 @@ func (m *Model) resolveSlackEntities(value string) string {
 			return id
 		}
 	})
-	return html.UnescapeString(value)
+	return renderEmojiAliases(html.UnescapeString(value))
+}
+
+func renderEmojiAliases(value string) string {
+	codes := emoji.CodeMap()
+	return emojiAliasPattern.ReplaceAllStringFunc(value, func(alias string) string {
+		if rendered, ok := codes[alias]; ok {
+			return strings.TrimSpace(rendered)
+		}
+		if strings.HasPrefix(alias, ":flag-") {
+			return strings.TrimSpace(emoji.Emojize(alias))
+		}
+		return alias
+	})
 }
 
 func renderMrkdwnLine(prefix, value string, edited bool) styledtext.Line {
@@ -1167,7 +1181,7 @@ func renderReactions(reactions []slack.Reaction, selfUserID string) string {
 		if own {
 			marker = "*"
 		}
-		parts = append(parts, fmt.Sprintf(":%s: %d%s", reaction.Name, reaction.Count, marker))
+		parts = append(parts, fmt.Sprintf("%s %d%s", renderEmojiAliases(":"+reaction.Name+":"), reaction.Count, marker))
 	}
 	return strings.Join(parts, "  ")
 }
@@ -1518,7 +1532,7 @@ func openLocalFile(path string) error {
 	return command.Start()
 }
 
-func kittyImagePayload(pngData []byte, imageID uint32, columns, rows int) []byte {
+func kittyImagePayload(pngData []byte, imageID uint32, columns, rows int) string {
 	payload := base64.StdEncoding.EncodeToString(pngData)
 	var output bytes.Buffer
 	for first := true; len(payload) > 0; first = false {
@@ -1535,7 +1549,7 @@ func kittyImagePayload(pngData []byte, imageID uint32, columns, rows int) []byte
 		}
 		payload = rest
 	}
-	return output.Bytes()
+	return output.String()
 }
 
 var kittyDiacritics = []rune{

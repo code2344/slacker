@@ -48,6 +48,14 @@ func TestRenderSlackTextResolvesEntitiesAndFormatting(t *testing.T) {
 	}
 }
 
+func TestRenderSlackTextConvertsKnownEmojiAndPreservesCustomEmoji(t *testing.T) {
+	m := &Model{users: map[string]slack.User{}, conversations: map[string]slack.Conversation{}}
+	got := m.renderSlackText(":wave: :workspace_custom_thing:")
+	if got != "👋 :workspace_custom_thing:" {
+		t.Fatalf("rendered emoji = %q", got)
+	}
+}
+
 func TestRenderMrkdwnLineAppliesInlineStyles(t *testing.T) {
 	line := renderMrkdwnLine("  ", "*bold* _italic_ ~gone~ `code`", true)
 	if len(line) != 9 {
@@ -96,7 +104,7 @@ func TestConversationHeaderIncludesTopicAndMembers(t *testing.T) {
 
 func TestKittyImagePayloadIsChunkedAndSized(t *testing.T) {
 	payload := kittyImagePayload(make([]byte, 5000), 42, 40, 12)
-	encoded := string(payload)
+	encoded := payload
 	if !strings.Contains(encoded, "a=T,f=100,q=2,U=1,C=1,i=42,c=40,r=12,m=1;") {
 		t.Fatalf("first Kitty chunk missing sizing: %q", encoded[:min(120, len(encoded))])
 	}
@@ -223,7 +231,7 @@ func TestOwnReactionNamesAndRendering(t *testing.T) {
 	if got := strings.Join(ownReactionNames(reactions, "U1"), ","); got != "wave" {
 		t.Fatalf("own reactions = %q", got)
 	}
-	if got := renderReactions(reactions, "U1"); got != ":wave: 2*  :eyes: 1" {
+	if got := renderReactions(reactions, "U1"); got != "👋 2*  👀 1" {
 		t.Fatalf("rendered reactions = %q", got)
 	}
 }
