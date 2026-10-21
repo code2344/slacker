@@ -1,6 +1,7 @@
 package root
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -116,8 +117,35 @@ func TestDirectMessagesStayInDedicatedSidebarGroup(t *testing.T) {
 	if len(m.directMessages.Children()) != 1 || m.directMessages.Children()[0].Reference() != "D1" {
 		t.Fatalf("DM rows = %#v", m.directMessages.Children())
 	}
-	if got := m.sidebar.Root().Children()[0]; got != m.directMessages {
+	if got := m.sidebar.Root().Children()[1]; got != m.directMessages {
 		t.Fatal("direct messages group is not attached to the sidebar")
+	}
+}
+
+func TestSidebarShowsOnlyRecentDMsAndSeparatesApps(t *testing.T) {
+	users := map[string]slack.User{}
+	conversations := make([]slack.Conversation, 0, 20)
+	for i := 0; i < 18; i++ {
+		id := fmt.Sprintf("U%d", i)
+		users[id] = slack.User{ID: id, Name: fmt.Sprintf("user-%02d", i)}
+		conversations = append(conversations, slack.Conversation{ID: fmt.Sprintf("D%d", i), IsIM: true, User: id, Updated: int64(i + 1)})
+	}
+	bot := slack.User{ID: "UBOT", Name: "helper", IsBot: true}
+	users[bot.ID] = bot
+	conversations = append(conversations, slack.Conversation{ID: "DBOT", IsIM: true, User: bot.ID, Updated: 100})
+
+	m := NewModel(&config.Config{}, "Team", "U0", conversations, nil, users, nil, nil, nil)
+	if got := len(m.directMessages.Children()); got != 16 {
+		t.Fatalf("recent DM rows = %d, want 16", got)
+	}
+	if got := len(m.apps.Children()); got != 1 {
+		t.Fatalf("app rows = %d, want 1", got)
+	}
+	if got := m.directMessages.Children()[0].Line()[0].Text; got != "@ user-17" {
+		t.Fatalf("first recent DM = %q", got)
+	}
+	if got := len(m.dmSidebarRoot.Children()); got != 20 {
+		t.Fatalf("dedicated DM view rows = %d, want 20", got)
 	}
 }
 

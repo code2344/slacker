@@ -14,7 +14,9 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ayn2op/tview"
@@ -785,6 +787,7 @@ func runTUI(cfg *config.Config) error {
 	if _, ok := users[auth.UserID]; !ok {
 		users[auth.UserID] = slack.User{ID: auth.UserID, Name: auth.User, RealName: auth.User}
 	}
+	loadRecentDMUsers(ctx, client, conversations, users, 64)
 	profileFields, _ := client.TeamProfile(ctx)
 	counts, _ := client.ConversationCounts(ctx)
 	screen, err := tcell.NewScreen()
@@ -800,6 +803,56 @@ func runTUI(cfg *config.Config) error {
 	screen.EnablePaste()
 	tview.Styles = tview.Theme{}
 	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, auth.UserID, conversations, sections, users, profileFields, counts, client), tview.WithScreen(screen)).Run()
+}
+
+func loadRecentDMUsers(ctx context.Context, client *slack.Client, conversations []slack.Conversation, users map[string]slack.User, limit int) {
+	direct := make([]slack.Conversation, 0)
+	for _, conversation := range conversations {
+		if conversation.IsIM && conversation.User != "" {
+			direct = append(direct, conversation)
+		}
+	}
+	sort.SliceStable(direct, func(i, j int) bool {
+		left, right := direct[i].Updated, direct[j].Updated
+		if left == 0 {
+			left = direct[i].Created * 1000
+		}
+		if right == 0 {
+			right = direct[j].Created * 1000
+		}
+		return left > right
+	})
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	seen := make(map[string]bool)
+	for _, conversation := range direct {
+		if len(seen) >= limit {
+			break
+		}
+		if seen[conversation.User] {
+			continue
+		}
+		seen[conversation.User] = true
+		if _, ok := users[conversation.User]; ok {
+			continue
+		}
+		wg.Add(1)
+		go func(userID string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			user, err := client.UserInfo(ctx, userID)
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			users[userID] = user
+			mu.Unlock()
+		}(conversation.User)
+	}
+	wg.Wait()
 }
 
 func listAllConversations(ctx context.Context, client *slack.Client) ([]slack.Conversation, error) {

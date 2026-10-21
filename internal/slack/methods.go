@@ -64,6 +64,8 @@ type Conversation struct {
 	IsMember   bool   `json:"is_member"`
 	User       string `json:"user"`
 	NumMembers int    `json:"num_members"`
+	Created    int64  `json:"created"`
+	Updated    int64  `json:"updated"`
 	Topic      struct {
 		Value string `json:"value"`
 	} `json:"topic"`

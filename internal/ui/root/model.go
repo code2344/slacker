@@ -40,6 +40,10 @@ type Model struct {
 	cfg                *config.Config
 	sidebar            *tree.Model
 	directMessages     *tree.Node
+	apps               *tree.Node
+	homeSidebarRoot    *tree.Node
+	dmSidebarRoot      *tree.Node
+	workspaceName      string
 	header             *tview.TextView
 	messages           *tree.Model
 	composer           *tview.TextArea
@@ -113,6 +117,7 @@ type threadReference struct{ messageReference }
 type threadBackReference struct{ conversation slack.Conversation }
 type inspectorCloseReference struct{}
 type openDMReference struct{ userID string }
+type sidebarViewReference string
 type fileReference struct{ file slack.File }
 type searchMessageReference struct{ match slack.MessageSearchMatch }
 type threadLoadedMsg struct {
@@ -199,11 +204,15 @@ func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversation
 }
 
 func (m *Model) build(workspaceName string, conversations []slack.Conversation, sections []slack.ChannelSection) {
+	m.workspaceName = workspaceName
 	sections = orderSections(sections)
 	root := tree.NewNode("")
 	channels := tree.NewNode("Channels").SetExpanded(true).SetSelectable(false)
 	dms := tree.NewNode("Direct messages").SetExpanded(true).SetSelectable(false)
+	apps := tree.NewNode("Apps").SetExpanded(true).SetSelectable(false)
 	m.directMessages = dms
+	m.apps = apps
+	root.AddChild(tree.NewNode("💬  DMs").SetReference(sidebarViewReference("dms")))
 	root.AddChild(dms)
 	sectionNodes := map[string]*tree.Node{}
 	assigned := map[string]bool{}
@@ -261,29 +270,48 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 			}
 		}
 	}
-	var remaining []slack.Conversation
+	var remaining, direct []slack.Conversation
 	for _, conversation := range conversations {
-		if conversation.IsIM || conversation.IsMPIM || !assigned[conversation.ID] {
+		if conversation.IsIM || conversation.IsMPIM {
+			direct = append(direct, conversation)
+		} else if !assigned[conversation.ID] {
 			remaining = append(remaining, conversation)
 		}
 	}
 	sort.Slice(remaining, func(i, j int) bool { return remaining[i].Name < remaining[j].Name })
 	for _, conversation := range remaining {
 		if len(sections) > 0 {
-			if conversation.IsIM || conversation.IsMPIM {
-				addConversation(dms, conversation)
-			} else {
-				if channels.Children() == nil {
-					root.AddChild(channels)
-				}
-				addConversation(channels, conversation)
+			if channels.Children() == nil {
+				root.AddChild(channels)
 			}
-		} else if conversation.IsIM || conversation.IsMPIM {
-			addConversation(dms, conversation)
+			addConversation(channels, conversation)
 		} else {
 			addConversation(channels, conversation)
 		}
 	}
+	sort.SliceStable(direct, func(i, j int) bool { return conversationActivity(direct[i]) > conversationActivity(direct[j]) })
+	dmRoot := tree.NewNode("")
+	dmRoot.AddChild(tree.NewNode("← Home").SetReference(sidebarViewReference("home")))
+	dmRoot.AddChild(tree.NewNode("Recent direct messages").SetSelectable(false))
+	humanCount, appCount := 0, 0
+	for _, conversation := range direct {
+		isApp := m.isAppConversation(conversation)
+		if !isApp && humanCount < 16 {
+			addConversation(dms, conversation)
+			humanCount++
+		}
+		if isApp && appCount < 8 {
+			addConversation(apps, conversation)
+			appCount++
+		}
+		if !isApp && len(dmRoot.Children()) < 52 {
+			addConversation(dmRoot, conversation)
+		}
+	}
+	if len(apps.Children()) > 0 {
+		root.AddChild(apps)
+	}
+	m.homeSidebarRoot, m.dmSidebarRoot = root, dmRoot
 
 	m.sidebar.SetRoot(root).SetTopLevel(1).SetTitle(workspaceName)
 	ui.ConfigureBox(m.sidebar.Box, &m.cfg.Theme)
@@ -445,6 +473,14 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		}
 	case tree.SelectedMsg:
 		switch reference := msg.Node.Reference().(type) {
+		case sidebarViewReference:
+			switch reference {
+			case "dms":
+				m.sidebar.SetRoot(m.dmSidebarRoot).SetTitle("Direct messages")
+			case "home":
+				m.sidebar.SetRoot(m.homeSidebarRoot).SetTitle(m.workspaceName)
+			}
+			return nil
 		case string:
 			if reference == "" || m.client == nil {
 				break
@@ -1689,15 +1725,18 @@ func (m *Model) addDirectMessage(conversation slack.Conversation) {
 	if m.directMessages == nil {
 		m.directMessages = tree.NewNode("Direct messages").SetExpanded(true).SetSelectable(false)
 	}
+	if m.homeSidebarRoot == nil {
+		m.homeSidebarRoot = m.sidebar.Root()
+	}
 	attached := false
-	for _, node := range m.sidebar.Root().Children() {
+	for _, node := range m.homeSidebarRoot.Children() {
 		if node == m.directMessages {
 			attached = true
 			break
 		}
 	}
 	if !attached {
-		m.sidebar.Root().AddChild(m.directMessages)
+		m.homeSidebarRoot.AddChild(m.directMessages)
 	}
 	for _, node := range m.directMessages.Children() {
 		if id, ok := node.Reference().(string); ok && id == conversation.ID {
@@ -1705,6 +1744,24 @@ func (m *Model) addDirectMessage(conversation slack.Conversation) {
 		}
 	}
 	m.directMessages.AddChild(tree.NewNode("@ " + strings.TrimPrefix(m.conversationTitle(conversation), "@")).SetReference(conversation.ID))
+	if m.dmSidebarRoot != nil {
+		m.dmSidebarRoot.AddChild(tree.NewNode("@ " + strings.TrimPrefix(m.conversationTitle(conversation), "@")).SetReference(conversation.ID))
+	}
+}
+
+func conversationActivity(conversation slack.Conversation) int64 {
+	if conversation.Updated > 0 {
+		return conversation.Updated
+	}
+	return conversation.Created * 1000
+}
+
+func (m *Model) isAppConversation(conversation slack.Conversation) bool {
+	if !conversation.IsIM {
+		return false
+	}
+	user, ok := m.users[conversation.User]
+	return ok && (user.IsBot || user.ID == "USLACKBOT" || strings.EqualFold(user.Name, "slackbot"))
 }
 
 func (m *Model) conversationTitle(conversation slack.Conversation) string {
