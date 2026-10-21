@@ -787,7 +787,7 @@ func runTUI(cfg *config.Config) error {
 	if _, ok := users[auth.UserID]; !ok {
 		users[auth.UserID] = slack.User{ID: auth.UserID, Name: auth.User, RealName: auth.User}
 	}
-	conversations = loadRecentDMActivity(ctx, client, conversations, 128)
+	conversations = loadRecentDMActivity(ctx, client, conversations, 0)
 	loadRecentDMUsers(ctx, client, conversations, users, 64)
 	profileFields, _ := client.TeamProfile(ctx)
 	counts, _ := client.ConversationCounts(ctx)
@@ -824,7 +824,7 @@ func loadRecentDMActivity(ctx context.Context, client *slack.Client, conversatio
 		}
 		return leftActivity > rightActivity
 	})
-	if len(indices) > limit {
+	if limit > 0 && len(indices) > limit {
 		indices = indices[:limit]
 	}
 

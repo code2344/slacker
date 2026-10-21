@@ -68,6 +68,8 @@ type Model struct {
 	conversations      map[string]slack.Conversation
 	activeConversation string
 	activeThread       string
+	currentMessages    []slack.Message
+	currentHasMore     bool
 	searchMode         bool
 	selfUserID         string
 	editing            *messageReference
@@ -98,6 +100,7 @@ type historyLoadedMsg struct {
 type messageSentMsg struct {
 	conversation slack.Conversation
 	thread       string
+	message      slack.Message
 	err          error
 }
 
@@ -566,6 +569,8 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			return m.loadAuthors(userIDs, &msg, nil)
 		}
 		m.activeThread = ""
+		m.currentMessages = append(m.currentMessages[:0], msg.messages...)
+		m.currentHasMore = msg.hasMore
 		m.showMessages(msg.conversation, msg.messages, msg.hasMore, false)
 		m.composer.SetDisabled(false)
 		m.composer.SetTitle("Message " + m.conversationTitle(msg.conversation))
@@ -589,7 +594,13 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		if msg.thread != "" {
 			return m.loadThread(msg.conversation, msg.thread)
 		}
-		return m.loadHistory(msg.conversation)
+		message := msg.message
+		if message.User == "" {
+			message.User = m.selfUserID
+		}
+		m.currentMessages = append([]slack.Message{message}, m.currentMessages...)
+		m.showMessages(msg.conversation, m.currentMessages, m.currentHasMore, false)
+		return nil
 	case messageMutatedMsg:
 		m.composer.SetDisabled(false)
 		m.threadComposer.SetDisabled(false)
@@ -853,8 +864,8 @@ func (m *Model) sendMessage(conversation slack.Conversation, text, thread string
 	return func() tview.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, err := m.client.PostMessage(ctx, conversation.ID, text, thread)
-		return messageSentMsg{conversation: conversation, thread: thread, err: err}
+		message, err := m.client.PostMessage(ctx, conversation.ID, text, thread)
+		return messageSentMsg{conversation: conversation, thread: thread, message: message, err: err}
 	}
 }
 

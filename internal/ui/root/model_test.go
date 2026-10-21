@@ -171,6 +171,26 @@ func TestSidebarUsesLatestMessageAndExcludesEmptyDMs(t *testing.T) {
 	}
 }
 
+func TestSentMessageIsRenderedWithoutWaitingForHistory(t *testing.T) {
+	conversation := slack.Conversation{ID: "D1", IsIM: true, User: "U2"}
+	m := NewModel(&config.Config{}, "Team", "U1", []slack.Conversation{conversation}, nil, map[string]slack.User{
+		"U1": {ID: "U1", Name: "me"},
+		"U2": {ID: "U2", Name: "friend"},
+	}, nil, nil, nil)
+	m.activeConversation = conversation.ID
+	m.currentMessages = []slack.Message{{User: "U2", Text: "before", Timestamp: "100.000001"}}
+	cmd := m.Update(messageSentMsg{
+		conversation: conversation,
+		message:      slack.Message{Text: "just sent", Timestamp: "200.000001"},
+	})
+	if cmd != nil {
+		t.Fatal("successful non-thread send unexpectedly scheduled a history reload")
+	}
+	if len(m.currentMessages) != 2 || m.currentMessages[0].Text != "just sent" || m.currentMessages[0].User != "U1" {
+		t.Fatalf("current messages = %#v", m.currentMessages)
+	}
+}
+
 func TestOwnReactionNamesAndRendering(t *testing.T) {
 	reactions := []slack.Reaction{{Name: "wave", Count: 2, Users: []string{"U1", "U2"}}, {Name: "eyes", Count: 1, Users: []string{"U2"}}}
 	if got := strings.Join(ownReactionNames(reactions, "U1"), ","); got != "wave" {
