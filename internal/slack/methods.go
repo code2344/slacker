@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -159,16 +160,49 @@ func (c *Client) RemoveReaction(ctx context.Context, channel, timestamp, name st
 }
 
 func (c *Client) ConversationHistory(ctx context.Context, channel string, limit int) ([]Message, bool, error) {
+	messages, _, hasMore, err := c.ConversationHistoryPage(ctx, channel, limit, "")
+	return messages, hasMore, err
+}
+
+func (c *Client) ConversationHistoryPage(ctx context.Context, channel string, limit int, cursor string) ([]Message, string, bool, error) {
 	params := url.Values{"channel": {channel}}
 	if limit > 0 {
 		params.Set("limit", fmt.Sprint(limit))
 	}
+	if cursor != "" {
+		params.Set("cursor", cursor)
+	}
 	var result struct {
 		Messages []Message `json:"messages"`
 		HasMore  bool      `json:"has_more"`
+		Metadata struct {
+			NextCursor string `json:"next_cursor"`
+		} `json:"response_metadata"`
 	}
 	err := c.Call(ctx, "conversations.history", params, &result)
-	return result.Messages, result.HasMore, err
+	return result.Messages, result.Metadata.NextCursor, result.HasMore, err
+}
+
+func (c *Client) MarkConversation(ctx context.Context, conversation Conversation, timestamp string) error {
+	if timestamp == "" {
+		return nil
+	}
+	params := url.Values{"channel": {conversation.ID}, "ts": {timestamp}}
+	err := c.Call(ctx, "conversations.mark", params, nil)
+	var apiErr *APIError
+	if err == nil || !errors.As(err, &apiErr) || (apiErr.Code != "unknown_method" && apiErr.Code != "method_not_supported_for_channel_type") {
+		return err
+	}
+	method, key := "channels.mark", "channel"
+	switch {
+	case conversation.IsIM:
+		method, key = "im.mark", "channel"
+	case conversation.IsMPIM:
+		method, key = "mpim.mark", "channel"
+	case conversation.IsGroup || conversation.IsPrivate:
+		method, key = "groups.mark", "channel"
+	}
+	return c.Call(ctx, method, url.Values{key: {conversation.ID}, "ts": {timestamp}}, nil)
 }
 
 func (c *Client) ConversationReplies(ctx context.Context, channel, timestamp string, limit int) ([]Message, string, error) {

@@ -282,6 +282,56 @@ func TestMainComposerNeverSendsIntoOpenThread(t *testing.T) {
 	}
 }
 
+func TestConversationAndThreadDraftsStayIsolated(t *testing.T) {
+	m := NewModel(&config.Config{}, "Team", "U1", []slack.Conversation{
+		{ID: "C1", Name: "one", IsChannel: true},
+		{ID: "C2", Name: "two", IsChannel: true},
+	}, nil, nil, nil, nil, nil)
+	m.activeConversation = "C1"
+	m.composer.SetText("channel one draft", true)
+	m.activeThread = "100.1"
+	m.inspectorKind = "thread"
+	m.threadComposer.SetText("thread draft", true)
+	m.saveActiveDraft()
+
+	m.activeConversation = "C2"
+	m.restoreConversationDraft("C2")
+	if got := m.composer.Text(); got != "" {
+		t.Fatalf("channel two inherited draft %q", got)
+	}
+	m.restoreConversationDraft("C1")
+	if got := m.composer.Text(); got != "channel one draft" {
+		t.Fatalf("channel one draft = %q", got)
+	}
+	if got := m.threadDrafts[draftKey("C1", "100.1")]; got != "thread draft" {
+		t.Fatalf("thread draft = %q", got)
+	}
+}
+
+func TestOlderHistoryAppendsAndPreservesSelection(t *testing.T) {
+	conversation := slack.Conversation{ID: "C1", Name: "general", IsChannel: true}
+	m := NewModel(&config.Config{}, "Team", "U1", []slack.Conversation{conversation}, nil, nil, nil, nil, nil)
+	m.activeConversation = conversation.ID
+	m.currentMessages = []slack.Message{{User: "U1", Text: "new", Timestamp: "200.1"}}
+	m.showMessages(conversation, m.currentMessages, true, false)
+	m.main.SetFocus(mainMessagesIndex)
+	m.right.SetFocus(rightMessagesIndex)
+	m.Update(olderHistoryLoadedMsg{
+		conversation: conversation,
+		messages:     []slack.Message{{User: "U2", Text: "old", Timestamp: "100.1"}},
+		cursor:       "next",
+		hasMore:      true,
+		selectedTS:   "200.1",
+	})
+	if len(m.currentMessages) != 2 || m.currentMessages[1].Text != "old" || m.historyCursor != "next" {
+		t.Fatalf("history = %#v cursor=%q", m.currentMessages, m.historyCursor)
+	}
+	reference, ok := m.selectedMessage()
+	if !ok || reference.message.Timestamp != "200.1" {
+		t.Fatalf("selected message = %#v, ok=%v", reference, ok)
+	}
+}
+
 func TestOwnReactionNamesAndRendering(t *testing.T) {
 	reactions := []slack.Reaction{{Name: "wave", Count: 2, Users: []string{"U1", "U2"}}, {Name: "eyes", Count: 1, Users: []string{"U2"}}}
 	if got := strings.Join(ownReactionNames(reactions, "U1"), ","); got != "wave" {

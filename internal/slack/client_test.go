@@ -99,6 +99,56 @@ func TestConversationHistory(t *testing.T) {
 	}
 }
 
+func TestConversationHistoryPageUsesAndReturnsCursor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.Form.Get("cursor"); got != "older-page" {
+			t.Errorf("cursor = %q", got)
+		}
+		io.WriteString(w, `{"ok":true,"messages":[{"text":"older","ts":"100.1"}],"has_more":true,"response_metadata":{"next_cursor":"oldest-page"}}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, cursor, hasMore, err := client.ConversationHistoryPage(context.Background(), "C123", 100, "older-page")
+	if err != nil || len(messages) != 1 || cursor != "oldest-page" || !hasMore {
+		t.Fatalf("messages=%#v cursor=%q hasMore=%v err=%v", messages, cursor, hasMore, err)
+	}
+}
+
+func TestMarkConversationFallsBackForIM(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/api/conversations.mark" {
+			io.WriteString(w, `{"ok":false,"error":"unknown_method"}`)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("channel") != "D123" || r.Form.Get("ts") != "200.1" {
+			t.Errorf("mark form = %#v", r.Form)
+		}
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.MarkConversation(context.Background(), Conversation{ID: "D123", IsIM: true}, "200.1"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(paths, ",") != "/api/conversations.mark,/api/im.mark" {
+		t.Fatalf("mark paths = %#v", paths)
+	}
+}
+
 func TestPostMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/chat.postMessage" {

@@ -71,6 +71,10 @@ type Model struct {
 	activeThread       string
 	currentMessages    []slack.Message
 	currentHasMore     bool
+	historyCursor      string
+	historyLoading     bool
+	drafts             map[string]string
+	threadDrafts       map[string]string
 	searchMode         bool
 	selfUserID         string
 	editing            *messageReference
@@ -105,7 +109,22 @@ type historyLoadedMsg struct {
 	messages     []slack.Message
 	previews     map[string]kittyPreview
 	hasMore      bool
+	cursor       string
 	err          error
+}
+type olderHistoryLoadedMsg struct {
+	conversation slack.Conversation
+	messages     []slack.Message
+	previews     map[string]kittyPreview
+	hasMore      bool
+	cursor       string
+	selectedTS   string
+	err          error
+}
+type conversationMarkedMsg struct {
+	conversationID string
+	timestamp      string
+	err            error
 }
 
 type messageSentMsg struct {
@@ -185,6 +204,9 @@ type realtimeEventMsg struct {
 }
 
 func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversations []slack.Conversation, sections []slack.ChannelSection, users map[string]slack.User, profileFields []slack.TeamProfileField, counts map[string]slack.ConversationCount, client *slack.Client) *Model {
+	if counts == nil {
+		counts = make(map[string]slack.ConversationCount)
+	}
 	m := &Model{
 		Layers:         layers.New(),
 		cfg:            cfg,
@@ -210,6 +232,8 @@ func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversation
 		counts:         counts,
 		conversations:  make(map[string]slack.Conversation, len(conversations)),
 		imagePreviews:  make(map[string]kittyPreview),
+		drafts:         make(map[string]string),
+		threadDrafts:   make(map[string]string),
 	}
 	for _, field := range profileFields {
 		m.profileFields[field.ID] = field
@@ -349,7 +373,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	m.composer.SetDisabled(true)
 	m.composer.SetTitle("Composer")
 	ui.ConfigureBox(m.composer.Box, &m.cfg.Theme)
-	m.controls.SetText("  Enter send/open   t thread   r react   e edit   d delete   / search   Esc close").SetScrollable(false).SetWrap(false)
+	m.controls.SetText("  Enter send/open   ↑ older at top   t thread   r react   e edit   d delete   / search   Esc close").SetScrollable(false).SetWrap(false)
 
 	m.right.SetDirection(flex.DirectionRow).
 		AddItem(m.header, 2, 0, false).
@@ -425,6 +449,11 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		if msg.Key() == tcell.KeyEscape && m.inspectorVisible {
 			m.closeInspector()
 			return nil
+		}
+		if (msg.Key() == tcell.KeyUp || msg.Key() == tcell.KeyPgUp) && m.main.Focused() == mainMessagesIndex && m.right.Focused() == rightMessagesIndex && m.currentHasMore && !m.historyLoading && m.atOldestMessage() {
+			m.historyLoading = true
+			m.messages.SetTitle("Loading older messages…")
+			return m.loadOlderHistory(m.conversations[m.activeConversation])
 		}
 		if reference, ok := m.selectedMessage(); ok {
 			switch msg.Str() {
@@ -509,9 +538,11 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			if reference == "" || m.client == nil {
 				break
 			}
+			m.saveActiveDraft()
 			m.closeInspector()
 			conversation := m.conversations[reference]
 			m.activeConversation, m.activeThread = reference, ""
+			m.restoreConversationDraft(reference)
 			m.showConversationHeader(conversation)
 			m.messages.SetTitle("Messages")
 			m.setMessageNotice("Loading messages…")
@@ -555,9 +586,11 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.setMessageNotice("Could not open direct message: " + msg.err.Error())
 			break
 		}
+		m.saveActiveDraft()
 		m.conversations[msg.conversation.ID] = msg.conversation
 		m.addDirectMessage(msg.conversation)
 		m.activeConversation, m.activeThread = msg.conversation.ID, ""
+		m.restoreConversationDraft(msg.conversation.ID)
 		m.showConversationHeader(msg.conversation)
 		m.closeInspector()
 		m.messages.SetTitle("Messages")
@@ -582,10 +615,49 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.activeThread = ""
 		m.currentMessages = append(m.currentMessages[:0], msg.messages...)
 		m.currentHasMore = msg.hasMore
+		m.historyCursor = msg.cursor
+		m.historyLoading = false
 		m.showMessages(msg.conversation, msg.messages, msg.hasMore, false)
 		m.composer.SetDisabled(false)
 		m.composer.SetTitle("Message " + m.conversationTitle(msg.conversation))
+		commands := []tview.Cmd{uploadKittyPreviews(msg.previews)}
+		if len(msg.messages) > 0 {
+			commands = append(commands, m.markConversationRead(msg.conversation, msg.messages[0].Timestamp))
+		}
+		return tview.Batch(commands...)
+	case olderHistoryLoadedMsg:
+		m.historyLoading = false
+		m.messages.SetTitle("Messages")
+		if msg.conversation.ID != m.activeConversation {
+			break
+		}
+		if msg.err != nil {
+			m.messages.SetTitle("Older messages failed: " + msg.err.Error())
+			break
+		}
+		for id, preview := range msg.previews {
+			m.imagePreviews[id] = preview
+		}
+		seen := make(map[string]bool, len(m.currentMessages))
+		for _, message := range m.currentMessages {
+			seen[message.Timestamp] = true
+		}
+		for _, message := range msg.messages {
+			if !seen[message.Timestamp] {
+				m.currentMessages = append(m.currentMessages, message)
+			}
+		}
+		m.currentHasMore, m.historyCursor = msg.hasMore, msg.cursor
+		m.showMessages(msg.conversation, m.currentMessages, msg.hasMore, false)
+		m.selectMessageTimestamp(msg.selectedTS)
 		return uploadKittyPreviews(msg.previews)
+	case conversationMarkedMsg:
+		if msg.err == nil {
+			count := m.counts[msg.conversationID]
+			count.LastRead, count.UnreadCount, count.MentionCount = msg.timestamp, 0, 0
+			m.counts[msg.conversationID] = count
+		}
+		return nil
 	case messageSentMsg:
 		if msg.conversation.ID != m.activeConversation {
 			break
@@ -597,9 +669,11 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			break
 		}
 		if msg.thread != "" {
+			delete(m.threadDrafts, draftKey(msg.conversation.ID, msg.thread))
 			m.threadComposer.SetText("", false)
 			m.threadComposer.SetDisabled(false)
 		} else {
+			delete(m.drafts, msg.conversation.ID)
 			m.composer.SetText("", false)
 		}
 		if msg.thread != "" {
@@ -651,6 +725,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			return m.loadAuthors(userIDs, nil, &msg)
 		}
 		m.activeThread = msg.timestamp
+		m.threadComposer.SetText(m.threadDrafts[draftKey(msg.conversation.ID, msg.timestamp)], true)
 		m.showThread(msg.conversation, msg.messages)
 		m.openInspector()
 		return uploadKittyPreviews(msg.previews)
@@ -1760,6 +1835,9 @@ func (m *Model) closeInspector() {
 	if !m.inspectorVisible {
 		return
 	}
+	if m.inspectorKind == "thread" && m.activeConversation != "" && m.activeThread != "" && m.editing == nil {
+		m.threadDrafts[draftKey(m.activeConversation, m.activeThread)] = m.threadComposer.Text()
+	}
 	m.main.RemoveItem(m.inspector)
 	m.main.ResizeItem(m.sidebar, 0, m.cfg.Sidebar.WidthPercent)
 	m.main.ResizeItem(m.right, 0, 100-m.cfg.Sidebar.WidthPercent)
@@ -1823,10 +1901,89 @@ func (m *Model) loadHistory(conversation slack.Conversation) tview.Cmd {
 	return func() tview.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		messages, hasMore, err := m.client.ConversationHistory(ctx, conversation.ID, 100)
+		messages, cursor, hasMore, err := m.client.ConversationHistoryPage(ctx, conversation.ID, 100, "")
 		previews := m.loadKittyPreviews(ctx, messages)
-		return historyLoadedMsg{conversation: conversation, messages: messages, previews: previews, hasMore: hasMore, err: err}
+		return historyLoadedMsg{conversation: conversation, messages: messages, previews: previews, hasMore: hasMore, cursor: cursor, err: err}
 	}
+}
+
+func (m *Model) loadOlderHistory(conversation slack.Conversation) tview.Cmd {
+	cursor := m.historyCursor
+	selectedTS := ""
+	if reference, ok := m.selectedMessage(); ok {
+		selectedTS = reference.message.Timestamp
+	}
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		messages, nextCursor, hasMore, err := m.client.ConversationHistoryPage(ctx, conversation.ID, 100, cursor)
+		previews := m.loadKittyPreviews(ctx, messages)
+		return olderHistoryLoadedMsg{conversation: conversation, messages: messages, previews: previews, hasMore: hasMore, cursor: nextCursor, selectedTS: selectedTS, err: err}
+	}
+}
+
+func (m *Model) markConversationRead(conversation slack.Conversation, timestamp string) tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		err := m.client.MarkConversation(ctx, conversation, timestamp)
+		return conversationMarkedMsg{conversationID: conversation.ID, timestamp: timestamp, err: err}
+	}
+}
+
+func (m *Model) atOldestMessage() bool {
+	current := m.messages.CurrentNode()
+	if current == nil {
+		return false
+	}
+	selectableSeen := 0
+	for _, node := range m.messages.Root().Children() {
+		if node.Reference() == nil {
+			continue
+		}
+		if node == current {
+			return selectableSeen == 0
+		}
+		selectableSeen++
+	}
+	return false
+}
+
+func (m *Model) selectMessageTimestamp(timestamp string) {
+	if timestamp == "" {
+		return
+	}
+	for _, node := range m.messages.Root().Children() {
+		switch reference := node.Reference().(type) {
+		case messageReference:
+			if reference.message.Timestamp == timestamp {
+				m.messages.SetCurrentNode(node)
+				return
+			}
+		case messageProfileReference:
+			if reference.message.Timestamp == timestamp {
+				m.messages.SetCurrentNode(node)
+				return
+			}
+		}
+	}
+}
+
+func draftKey(conversationID, threadTimestamp string) string {
+	return conversationID + "\x00" + threadTimestamp
+}
+
+func (m *Model) saveActiveDraft() {
+	if m.activeConversation != "" && !m.searchMode && m.editing == nil {
+		m.drafts[m.activeConversation] = m.composer.Text()
+	}
+	if m.activeConversation != "" && m.activeThread != "" && m.inspectorKind == "thread" && m.editing == nil {
+		m.threadDrafts[draftKey(m.activeConversation, m.activeThread)] = m.threadComposer.Text()
+	}
+}
+
+func (m *Model) restoreConversationDraft(conversationID string) {
+	m.composer.SetText(m.drafts[conversationID], true)
 }
 
 func (m *Model) openDM(userID string) tview.Cmd {

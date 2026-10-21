@@ -13,12 +13,12 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] DM display names and message author names
 - [~] Unread and mention markers
 - [x] Slack-style right-hand thread pane
-- [ ] Mark channel/thread read and preserve read position
+- [~] Mark conversations read on open; persistent per-message read position remains planned
 - [ ] More-unreads navigation and unread-only view
 - [ ] Browse/search/join/leave/create/archive channels
 - [~] Start one-to-one DMs from profiles; group DM creation remains planned
 - [ ] Channel topics, purposes, bookmarks, tabs, and member lists
-- [ ] Conversation history pagination and jump to date/message
+- [~] Upward conversation history pagination; jump to date/message remains planned
 
 ## Messages
 
@@ -27,7 +27,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Edit and delete your own messages
 - [~] Rich composer: Slack mrkdwn is sent correctly; formatting toolbar and autocomplete remain planned
 - [ ] Mentions and channel/user/emoji autocomplete
-- [ ] Scheduled messages and drafts
+- [~] In-session channel and thread drafts; persistence and scheduled messages remain planned
 - [ ] Forward/share messages and copy permalinks
 - [ ] Pin/unpin, save-for-later, reminders, and follow-thread controls
 - [~] Keyboard message actions; Slack app/workflow actions remain planned
