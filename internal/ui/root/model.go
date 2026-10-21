@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -288,6 +289,15 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 		} else {
 			addConversation(channels, conversation)
 		}
+	}
+	checkedActivity := false
+	for _, conversation := range direct {
+		checkedActivity = checkedActivity || conversation.ActivityChecked
+	}
+	if checkedActivity {
+		direct = slices.DeleteFunc(direct, func(conversation slack.Conversation) bool {
+			return !conversation.ActivityChecked || conversation.LatestMessageTS == ""
+		})
 	}
 	sort.SliceStable(direct, func(i, j int) bool { return conversationActivity(direct[i]) > conversationActivity(direct[j]) })
 	dmRoot := tree.NewNode("")
@@ -1749,11 +1759,14 @@ func (m *Model) addDirectMessage(conversation slack.Conversation) {
 	}
 }
 
-func conversationActivity(conversation slack.Conversation) int64 {
-	if conversation.Updated > 0 {
-		return conversation.Updated
+func conversationActivity(conversation slack.Conversation) string {
+	if conversation.LatestMessageTS != "" {
+		return conversation.LatestMessageTS
 	}
-	return conversation.Created * 1000
+	if conversation.Updated > 0 {
+		return fmt.Sprintf("%020d", conversation.Updated)
+	}
+	return fmt.Sprintf("%020d", conversation.Created*1000)
 }
 
 func (m *Model) isAppConversation(conversation slack.Conversation) bool {

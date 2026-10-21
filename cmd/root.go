@@ -787,6 +787,7 @@ func runTUI(cfg *config.Config) error {
 	if _, ok := users[auth.UserID]; !ok {
 		users[auth.UserID] = slack.User{ID: auth.UserID, Name: auth.User, RealName: auth.User}
 	}
+	conversations = loadRecentDMActivity(ctx, client, conversations, 128)
 	loadRecentDMUsers(ctx, client, conversations, users, 64)
 	profileFields, _ := client.TeamProfile(ctx)
 	counts, _ := client.ConversationCounts(ctx)
@@ -805,6 +806,50 @@ func runTUI(cfg *config.Config) error {
 	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, auth.UserID, conversations, sections, users, profileFields, counts, client), tview.WithScreen(screen)).Run()
 }
 
+func loadRecentDMActivity(ctx context.Context, client *slack.Client, conversations []slack.Conversation, limit int) []slack.Conversation {
+	indices := make([]int, 0)
+	for index, conversation := range conversations {
+		if conversation.IsIM || conversation.IsMPIM {
+			indices = append(indices, index)
+		}
+	}
+	sort.SliceStable(indices, func(i, j int) bool {
+		left, right := conversations[indices[i]], conversations[indices[j]]
+		leftActivity, rightActivity := left.Updated, right.Updated
+		if leftActivity == 0 {
+			leftActivity = left.Created * 1000
+		}
+		if rightActivity == 0 {
+			rightActivity = right.Created * 1000
+		}
+		return leftActivity > rightActivity
+	})
+	if len(indices) > limit {
+		indices = indices[:limit]
+	}
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for _, index := range indices {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			messages, _, err := client.ConversationHistory(ctx, conversations[index].ID, 1)
+			if err != nil {
+				return
+			}
+			conversations[index].ActivityChecked = true
+			if len(messages) > 0 {
+				conversations[index].LatestMessageTS = messages[0].Timestamp
+			}
+		}(index)
+	}
+	wg.Wait()
+	return conversations
+}
+
 func loadRecentDMUsers(ctx context.Context, client *slack.Client, conversations []slack.Conversation, users map[string]slack.User, limit int) {
 	direct := make([]slack.Conversation, 0)
 	for _, conversation := range conversations {
@@ -813,6 +858,9 @@ func loadRecentDMUsers(ctx context.Context, client *slack.Client, conversations 
 		}
 	}
 	sort.SliceStable(direct, func(i, j int) bool {
+		if direct[i].LatestMessageTS != direct[j].LatestMessageTS {
+			return direct[i].LatestMessageTS > direct[j].LatestMessageTS
+		}
 		left, right := direct[i].Updated, direct[j].Updated
 		if left == 0 {
 			left = direct[i].Created * 1000

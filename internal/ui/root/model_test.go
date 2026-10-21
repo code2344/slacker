@@ -149,6 +149,28 @@ func TestSidebarShowsOnlyRecentDMsAndSeparatesApps(t *testing.T) {
 	}
 }
 
+func TestSidebarUsesLatestMessageAndExcludesEmptyDMs(t *testing.T) {
+	users := map[string]slack.User{
+		"U1": {ID: "U1", Name: "recent"},
+		"U2": {ID: "U2", Name: "opened-only"},
+		"U3": {ID: "U3", Name: "older"},
+	}
+	m := NewModel(&config.Config{}, "Team", "U0", []slack.Conversation{
+		{ID: "D1", IsIM: true, User: "U1", Updated: 1, ActivityChecked: true, LatestMessageTS: "200.000001"},
+		{ID: "D2", IsIM: true, User: "U2", Updated: 999, ActivityChecked: true},
+		{ID: "D3", IsIM: true, User: "U3", Updated: 500, ActivityChecked: true, LatestMessageTS: "100.000001"},
+	}, nil, users, nil, nil, nil)
+	if got := len(m.directMessages.Children()); got != 2 {
+		t.Fatalf("recent DM rows = %d, want 2", got)
+	}
+	if got := m.directMessages.Children()[0].Line()[0].Text; got != "@ recent" {
+		t.Fatalf("first DM = %q", got)
+	}
+	if got := m.directMessages.Children()[1].Line()[0].Text; got != "@ older" {
+		t.Fatalf("second DM = %q", got)
+	}
+}
+
 func TestOwnReactionNamesAndRendering(t *testing.T) {
 	reactions := []slack.Reaction{{Name: "wave", Count: 2, Users: []string{"U1", "U2"}}, {Name: "eyes", Count: 1, Users: []string{"U2"}}}
 	if got := strings.Join(ownReactionNames(reactions, "U1"), ","); got != "wave" {
