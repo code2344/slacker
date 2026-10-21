@@ -10,6 +10,7 @@ import (
 	"github.com/ayn2op/tview/tree"
 	"github.com/code2344/slacker/internal/config"
 	"github.com/code2344/slacker/internal/slack"
+	"github.com/gdamore/tcell/v3"
 )
 
 func TestRenderMessagesIncludesFilesReactionsAndThreads(t *testing.T) {
@@ -223,6 +224,24 @@ func TestSentMessageIsRenderedWithoutWaitingForHistory(t *testing.T) {
 	}
 	if len(m.currentMessages) != 2 || m.currentMessages[0].Text != "just sent" || m.currentMessages[0].User != "U1" {
 		t.Fatalf("current messages = %#v", m.currentMessages)
+	}
+}
+
+func TestEnterInComposerDispatchesMessageSend(t *testing.T) {
+	conversation := slack.Conversation{ID: "C1", Name: "general", IsChannel: true}
+	m := NewModel(&config.Config{}, "Team", "U1", []slack.Conversation{conversation}, nil, nil, nil, nil, nil)
+	m.activeConversation = conversation.ID
+	m.composer.SetDisabled(false)
+	m.composer.SetText("hello", true)
+	m.main.SetFocus(mainMessagesIndex)
+	m.right.SetFocus(rightComposerIndex)
+
+	cmd := m.Update(tcell.NewEventKey(tcell.KeyEnter, "", tcell.ModNone))
+	if cmd == nil {
+		t.Fatal("Enter in the focused composer did not dispatch a send")
+	}
+	if got := m.composer.Title(); got != "Sending…" {
+		t.Fatalf("composer title = %q", got)
 	}
 }
 

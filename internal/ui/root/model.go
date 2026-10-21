@@ -90,6 +90,16 @@ type kittyPreview struct {
 	pngData []byte
 }
 
+const (
+	mainSidebarIndex    = 0
+	mainMessagesIndex   = 1
+	mainInspectorIndex  = 2
+	rightMessagesIndex  = 1
+	rightComposerIndex  = 2
+	threadMessagesIndex = 0
+	threadComposerIndex = 1
+)
+
 type historyLoadedMsg struct {
 	conversation slack.Conversation
 	messages     []slack.Message
@@ -448,14 +458,14 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 				return nil
 			}
 		}
-		if msg.Str() == "/" && m.main.Focused() == 1 && m.right.Focused() == 0 {
+		if msg.Str() == "/" && m.main.Focused() == mainMessagesIndex && m.right.Focused() == rightMessagesIndex {
 			m.searchMode = true
 			m.composer.SetText("", false)
 			m.composer.SetTitle("Search messages and files — Enter to search · Esc to cancel")
-			m.right.SetFocus(1)
+			m.right.SetFocus(rightComposerIndex)
 			return nil
 		}
-		if msg.Key() == tcell.KeyEnter && m.activeThread != "" && m.main.Focused() == 2 && m.inspector.Focused() == 1 {
+		if msg.Key() == tcell.KeyEnter && m.activeThread != "" && m.main.Focused() == mainInspectorIndex && m.inspector.Focused() == threadComposerIndex {
 			text := strings.TrimSpace(m.threadComposer.Text())
 			if text != "" {
 				m.threadComposer.SetDisabled(true)
@@ -466,7 +476,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 				return m.sendMessage(m.conversations[m.activeConversation], text, m.activeThread)
 			}
 		}
-		if msg.Key() == tcell.KeyEnter && m.activeConversation != "" && m.main.Focused() == 1 && m.right.Focused() == 1 {
+		if msg.Key() == tcell.KeyEnter && m.activeConversation != "" && m.main.Focused() == mainMessagesIndex && m.right.Focused() == rightComposerIndex {
 			text := strings.TrimSpace(m.composer.Text())
 			if text != "" {
 				if m.searchMode {
@@ -732,9 +742,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 
 func (m *Model) selectedMessage() (messageReference, bool) {
 	var node *tree.Node
-	if m.main.Focused() == 1 && m.right.Focused() == 0 {
+	if m.main.Focused() == mainMessagesIndex && m.right.Focused() == rightMessagesIndex {
 		node = m.messages.CurrentNode()
-	} else if m.inspectorVisible && m.main.Focused() == 2 && m.inspector.Focused() == 0 {
+	} else if m.inspectorVisible && m.main.Focused() == mainInspectorIndex && m.inspector.Focused() == threadMessagesIndex {
 		node = m.threadMessages.CurrentNode()
 	}
 	if node == nil {
@@ -754,16 +764,16 @@ func (m *Model) selectedMessage() (messageReference, bool) {
 
 func (m *Model) beginEdit(reference messageReference) {
 	m.editing = &reference
-	m.editingInThread = m.inspectorVisible && m.main.Focused() == 2
+	m.editingInThread = m.inspectorVisible && m.main.Focused() == mainInspectorIndex
 	if m.editingInThread {
 		m.threadComposer.SetText(reference.message.Text, true)
 		m.threadComposer.SetTitle("Edit message — Enter to save")
-		m.inspector.SetFocus(1)
+		m.inspector.SetFocus(threadComposerIndex)
 		return
 	}
 	m.composer.SetText(reference.message.Text, true)
 	m.composer.SetTitle("Edit message — Enter to save")
-	m.right.SetFocus(1)
+	m.right.SetFocus(rightComposerIndex)
 }
 
 func (m *Model) cancelEdit() {
@@ -1446,7 +1456,7 @@ func (m *Model) showSearchResults(result searchLoadedMsg) {
 		root.AddChild(tree.NewNode("No results.").SetSelectable(false))
 	}
 	m.messages.SetRoot(root).SetTopLevel(1).SetTitle("Search: " + result.query)
-	m.right.SetFocus(0)
+	m.right.SetFocus(rightMessagesIndex)
 }
 
 func (m *Model) downloadAndOpen(file slack.File) tview.Cmd {
