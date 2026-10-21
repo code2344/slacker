@@ -45,6 +45,34 @@ func TestRenderSlackTextResolvesEntitiesAndFormatting(t *testing.T) {
 	}
 }
 
+func TestConversationTitleUsesDMDisplayName(t *testing.T) {
+	user := slack.User{ID: "U123", Name: "ruben"}
+	user.Profile.DisplayName = "Ruben Sutton"
+	m := &Model{users: map[string]slack.User{"U123": user}}
+	if got := m.conversationTitle(slack.Conversation{ID: "D123", IsIM: true, User: "U123"}); got != "@Ruben Sutton" {
+		t.Fatalf("DM title = %q", got)
+	}
+}
+
+func TestAddDirectMessageAttachesAndDeduplicatesSidebarGroup(t *testing.T) {
+	user := slack.User{ID: "U123", Name: "ruben"}
+	user.Profile.DisplayName = "Ruben"
+	m := &Model{
+		sidebar:       tree.NewModel().SetRoot(tree.NewNode("")),
+		users:         map[string]slack.User{"U123": user},
+		conversations: map[string]slack.Conversation{},
+	}
+	conversation := slack.Conversation{ID: "D123", IsIM: true, User: "U123"}
+	m.addDirectMessage(conversation)
+	m.addDirectMessage(conversation)
+	if len(m.sidebar.Root().Children()) != 1 || len(m.directMessages.Children()) != 1 {
+		t.Fatalf("sidebar groups = %d, DM rows = %d", len(m.sidebar.Root().Children()), len(m.directMessages.Children()))
+	}
+	if got := m.directMessages.Children()[0].Line()[0].Text; got != "@ Ruben" {
+		t.Fatalf("DM row = %q", got)
+	}
+}
+
 func TestOwnReactionNamesAndRendering(t *testing.T) {
 	reactions := []slack.Reaction{{Name: "wave", Count: 2, Users: []string{"U1", "U2"}}, {Name: "eyes", Count: 1, Users: []string{"U2"}}}
 	if got := strings.Join(ownReactionNames(reactions, "U1"), ","); got != "wave" {

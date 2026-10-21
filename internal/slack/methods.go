@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 type Auth struct {
@@ -231,6 +232,32 @@ func (c *Client) ListConversations(ctx context.Context, cursor string, limit int
 	}
 	err := c.Call(ctx, "users.conversations", params, &result)
 	return result.Channels, result.Metadata.NextCursor, err
+}
+
+func (c *Client) OpenConversation(ctx context.Context, userIDs []string) (Conversation, error) {
+	if len(userIDs) == 0 {
+		return Conversation{}, fmt.Errorf("at least one user is required")
+	}
+	params := url.Values{
+		"users":     {strings.Join(userIDs, ",")},
+		"return_im": {"true"},
+	}
+	var result struct {
+		Channel Conversation `json:"channel"`
+	}
+	if err := c.Call(ctx, "conversations.open", params, &result); err != nil {
+		return Conversation{}, err
+	}
+	if result.Channel.ID == "" {
+		return Conversation{}, fmt.Errorf("Slack returned an empty conversation")
+	}
+	if len(userIDs) == 1 {
+		result.Channel.IsIM = true
+		if result.Channel.User == "" {
+			result.Channel.User = userIDs[0]
+		}
+	}
+	return result.Channel, nil
 }
 
 type User struct {

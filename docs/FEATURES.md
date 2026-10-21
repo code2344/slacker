@@ -10,13 +10,13 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Live message updates over RTM with reconnect backoff
 - [x] Channel history and channel message sending
 - [x] Thread history and thread replies
-- [~] DM display names and message author names
+- [x] DM display names and message author names
 - [~] Unread and mention markers
 - [x] Slack-style right-hand thread pane
 - [ ] Mark channel/thread read and preserve read position
 - [ ] More-unreads navigation and unread-only view
 - [ ] Browse/search/join/leave/create/archive channels
-- [ ] Start DMs and group DMs
+- [~] Start one-to-one DMs from profiles; group DM creation remains planned
 - [ ] Channel topics, purposes, bookmarks, tabs, and member lists
 - [ ] Conversation history pagination and jump to date/message
 

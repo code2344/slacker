@@ -227,6 +227,40 @@ func TestListChannelSections(t *testing.T) {
 	}
 }
 
+func TestOpenConversation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/conversations.open" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("users") != "U123" || r.Form.Get("return_im") != "true" {
+			t.Errorf("form = %#v", r.Form)
+		}
+		io.WriteString(w, `{"ok":true,"channel":{"id":"D123","is_im":true,"user":"U123"}}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := client.OpenConversation(context.Background(), []string{"U123"})
+	if err != nil || conversation.ID != "D123" || !conversation.IsIM || conversation.User != "U123" {
+		t.Fatalf("conversation = %#v, err = %v", conversation, err)
+	}
+}
+
+func TestOpenConversationRequiresUser(t *testing.T) {
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.OpenConversation(context.Background(), nil); err == nil {
+		t.Fatal("expected an error for an empty user list")
+	}
+}
+
 func TestUserInfo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/users.info" {

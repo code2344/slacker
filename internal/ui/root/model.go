@@ -31,6 +31,7 @@ type Model struct {
 	*layers.Layers
 	cfg                *config.Config
 	sidebar            *tree.Model
+	directMessages     *tree.Node
 	messages           *tree.Model
 	composer           *tview.TextArea
 	main               *flex.Model
@@ -91,6 +92,7 @@ type messageProfileReference struct{ messageReference }
 type threadReference struct{ messageReference }
 type threadBackReference struct{ conversation slack.Conversation }
 type inspectorCloseReference struct{}
+type openDMReference struct{ userID string }
 type fileReference struct{ file slack.File }
 type searchMessageReference struct{ match slack.MessageSearchMatch }
 type threadLoadedMsg struct {
@@ -125,6 +127,10 @@ type searchLoadedMsg struct {
 type fileOpenedMsg struct {
 	path string
 	err  error
+}
+type dmOpenedMsg struct {
+	conversation slack.Conversation
+	err          error
 }
 
 type realtimeConnectedMsg struct {
@@ -172,6 +178,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	root := tree.NewNode("")
 	channels := tree.NewNode("Channels").SetExpanded(true).SetSelectable(false)
 	dms := tree.NewNode("Direct messages").SetExpanded(true).SetSelectable(false)
+	m.directMessages = dms
 	sectionNodes := map[string]*tree.Node{}
 	assigned := map[string]bool{}
 	for _, section := range sections {
@@ -323,7 +330,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.searchMode = false
 			m.composer.SetText("", false)
 			if conversation, ok := m.conversations[m.activeConversation]; ok {
-				m.composer.SetTitle("Message " + conversationTitle(conversation))
+				m.composer.SetTitle("Message " + m.conversationTitle(conversation))
 			}
 			return nil
 		}
@@ -413,12 +420,15 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.closeInspector()
 			conversation := m.conversations[reference]
 			m.activeConversation, m.activeThread = reference, ""
-			m.messages.SetTitle(conversationTitle(conversation))
+			m.messages.SetTitle(m.conversationTitle(conversation))
 			m.setMessageNotice("Loading messages…")
 			m.composer.SetDisabled(true)
 			return m.loadHistory(conversation)
 		case messageProfileReference:
 			return m.showProfile(reference.message.User)
+		case openDMReference:
+			m.setMessageNotice("Opening direct message…")
+			return m.openDM(reference.userID)
 		case messageReference:
 			return nil
 		case threadReference:
@@ -443,9 +453,22 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			}
 			m.activeConversation = conversation.ID
 			m.closeInspector()
-			m.setMessageNotice("Loading " + conversationTitle(conversation) + "…")
+			m.setMessageNotice("Loading " + m.conversationTitle(conversation) + "…")
 			return m.loadHistory(conversation)
 		}
+	case dmOpenedMsg:
+		if msg.err != nil {
+			m.setMessageNotice("Could not open direct message: " + msg.err.Error())
+			break
+		}
+		m.conversations[msg.conversation.ID] = msg.conversation
+		m.addDirectMessage(msg.conversation)
+		m.activeConversation, m.activeThread = msg.conversation.ID, ""
+		m.closeInspector()
+		m.messages.SetTitle(m.conversationTitle(msg.conversation))
+		m.composer.SetDisabled(true)
+		m.setMessageNotice("Loading messages…")
+		return m.loadHistory(msg.conversation)
 	case historyLoadedMsg:
 		if msg.conversation.ID != m.activeConversation {
 			break
@@ -461,13 +484,13 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.activeThread = ""
 		m.showMessages(msg.conversation, msg.messages, msg.hasMore, false)
 		m.composer.SetDisabled(false)
-		m.composer.SetTitle("Message " + conversationTitle(msg.conversation))
+		m.composer.SetTitle("Message " + m.conversationTitle(msg.conversation))
 	case messageSentMsg:
 		if msg.conversation.ID != m.activeConversation {
 			break
 		}
 		m.composer.SetDisabled(false)
-		m.composer.SetTitle("Message " + conversationTitle(msg.conversation))
+		m.composer.SetTitle("Message " + m.conversationTitle(msg.conversation))
 		if msg.err != nil {
 			m.composer.SetTitle("Send failed: " + msg.err.Error())
 			break
@@ -497,7 +520,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.editingInThread = false
 		m.composer.SetText("", false)
 		m.threadComposer.SetText("", false)
-		m.composer.SetTitle("Message " + conversationTitle(msg.conversation))
+		m.composer.SetTitle("Message " + m.conversationTitle(msg.conversation))
 		m.threadComposer.SetTitle("Reply in thread")
 		if msg.thread != "" {
 			return m.loadThread(msg.conversation, msg.thread)
@@ -647,7 +670,7 @@ func (m *Model) cancelEdit() {
 	m.composer.SetText("", false)
 	m.threadComposer.SetText("", false)
 	if conversation, ok := m.conversations[m.activeConversation]; ok {
-		m.composer.SetTitle("Message " + conversationTitle(conversation))
+		m.composer.SetTitle("Message " + m.conversationTitle(conversation))
 	}
 	m.threadComposer.SetTitle("Reply in thread")
 	m.editingInThread = false
@@ -837,9 +860,9 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 	}
 	m.messages.SetRoot(root).SetTopLevel(1)
 	if thread {
-		m.messages.SetTitle("Thread in " + conversationTitle(conversation))
+		m.messages.SetTitle("Thread in " + m.conversationTitle(conversation))
 	} else {
-		m.messages.SetTitle(conversationTitle(conversation))
+		m.messages.SetTitle(m.conversationTitle(conversation))
 	}
 }
 
@@ -896,7 +919,7 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 		}
 		previousAuthor, previousTime = authorKey, messageTime
 	}
-	m.threadMessages.SetRoot(root).SetTopLevel(1).SetTitle("Thread in " + conversationTitle(conversation))
+	m.threadMessages.SetRoot(root).SetTopLevel(1).SetTitle("Thread in " + m.conversationTitle(conversation))
 	m.showThreadInspector()
 }
 
@@ -990,12 +1013,14 @@ func (m *Model) showProfile(userID string) tview.Cmd {
 	} else if user.Name != "" && user.Name != realName {
 		root.AddChild(tree.NewNode("@" + user.Name).SetSelectable(false))
 	}
+	dmReference := any(openDMReference{userID: userID})
 	for _, conversation := range m.conversations {
 		if conversation.IsIM && conversation.User == userID {
-			root.AddChild(tree.NewNode("Message @" + handle).SetReference(conversation.ID))
+			dmReference = conversation.ID
 			break
 		}
 	}
+	root.AddChild(tree.NewNode("Message @" + handle).SetReference(dmReference))
 	if user.Profile.Title != "" || user.Profile.Pronouns != "" {
 		summary := user.Profile.Title
 		if user.Profile.Pronouns != "" {
@@ -1461,8 +1486,44 @@ func (m *Model) loadHistory(conversation slack.Conversation) tview.Cmd {
 	}
 }
 
-func conversationTitle(conversation slack.Conversation) string {
+func (m *Model) openDM(userID string) tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		conversation, err := m.client.OpenConversation(ctx, []string{userID})
+		return dmOpenedMsg{conversation: conversation, err: err}
+	}
+}
+
+func (m *Model) addDirectMessage(conversation slack.Conversation) {
+	if m.directMessages == nil {
+		m.directMessages = tree.NewNode("Direct messages").SetExpanded(true).SetSelectable(false)
+	}
+	attached := false
+	for _, node := range m.sidebar.Root().Children() {
+		if node == m.directMessages {
+			attached = true
+			break
+		}
+	}
+	if !attached {
+		m.sidebar.Root().AddChild(m.directMessages)
+	}
+	for _, node := range m.directMessages.Children() {
+		if id, ok := node.Reference().(string); ok && id == conversation.ID {
+			return
+		}
+	}
+	m.directMessages.AddChild(tree.NewNode("@ " + strings.TrimPrefix(m.conversationTitle(conversation), "@")).SetReference(conversation.ID))
+}
+
+func (m *Model) conversationTitle(conversation slack.Conversation) string {
 	name := conversation.Name
+	if conversation.IsIM {
+		if user, ok := m.users[conversation.User]; ok {
+			name = displayName(user)
+		}
+	}
 	if name == "" {
 		name = conversation.ID
 	}
