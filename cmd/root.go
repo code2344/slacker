@@ -8,9 +8,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -23,6 +26,7 @@ import (
 	uiroot "github.com/code2344/slacker/internal/ui/root"
 	"github.com/code2344/slacker/internal/workspace"
 	"github.com/gdamore/tcell/v3"
+	"github.com/mattn/go-shellwords"
 	"golang.org/x/term"
 )
 
@@ -50,8 +54,15 @@ func run(args []string) error {
 	configPath := flags.String("config-path", config.DefaultPath(), "path to config.toml")
 	logPath := flags.String("log-path", logger.DefaultPath(), "path to the log file")
 	debug := flags.Bool("debug", false, "enable debug logging")
+	send := flags.Bool("send", false, "send a message and exit")
+	flags.BoolVar(send, "s", false, "send a message and exit")
+	channel := flags.String("channel", "", "channel name or ID")
+	flags.StringVar(channel, "c", "", "channel name or ID")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *send {
+		return runSend(*channel, strings.Join(flags.Args(), " "))
 	}
 	level := slog.LevelInfo
 	if *debug {
@@ -71,7 +82,7 @@ func run(args []string) error {
 
 func runWorkspace(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: slacker workspace <add|link|diagnose|list|current|use|remove|refresh>")
+		return errors.New("usage: slacker workspace <add|import-curl|link|diagnose|list|current|use|remove|refresh>")
 	}
 	store := workspace.New(workspace.DefaultPath())
 	switch args[0] {
@@ -117,9 +128,132 @@ func runWorkspace(args []string) error {
 		return linkWorkspace(store, args[1:])
 	case "diagnose":
 		return diagnoseWorkspace(args[1:])
+	case "import-curl":
+		return importCurlWorkspace(store, args[1:])
 	default:
 		return fmt.Errorf("unknown workspace command %q", args[0])
 	}
+}
+
+func importCurlWorkspace(store *workspace.Store, args []string) error {
+	flags := flag.NewFlagSet("workspace import-curl", flag.ContinueOnError)
+	domain := flags.String("domain", "", "workspace URL or subdomain")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	input, err := curlInput()
+	if err != nil {
+		return err
+	}
+	token, cookie, userAgent, detectedDomain, err := parseSlackCurl(string(input))
+	if err != nil {
+		return err
+	}
+	if *domain == "" {
+		*domain = detectedDomain
+	}
+	*domain = normalizeWorkspaceDomain(*domain)
+	client, err := slack.NewClient(slack.Session{Token: token, Cookie: cookie, UserAgent: userAgent})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	auth, err := client.Connect(ctx)
+	if err != nil {
+		return fmt.Errorf("Slack rejected the copied browser request: %w", err)
+	}
+	if *domain == "" {
+		*domain = normalizeWorkspaceDomain(auth.URL)
+	}
+	if *domain == "" {
+		return errors.New("workspace domain was not present in Slack's response; pass --domain <workspace>")
+	}
+	meta := workspace.Metadata{TeamID: auth.TeamID, Name: auth.Team, Domain: *domain, APIURL: client.APIURL()}
+	if err := store.Put(meta, workspace.Secret{Token: token, Cookie: cookie, UserAgent: userAgent}, true); err != nil {
+		return err
+	}
+	fmt.Printf("Added %s (%s)\n", meta.Name, meta.TeamID)
+	return nil
+}
+
+func curlInput() ([]byte, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return io.ReadAll(io.LimitReader(os.Stdin, 4<<20))
+	}
+	var command string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		command = "pbpaste"
+	case "windows":
+		command, args = "powershell", []string{"-NoProfile", "-Command", "Get-Clipboard -Raw"}
+	default:
+		if _, err := exec.LookPath("wl-paste"); err == nil {
+			command, args = "wl-paste", []string{"--no-newline"}
+		} else {
+			command, args = "xclip", []string{"-selection", "clipboard", "-o"}
+		}
+	}
+	data, err := exec.Command(command, args...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("read copied cURL command from clipboard: %w", err)
+	}
+	return data, nil
+}
+
+func parseSlackCurl(input string) (token, cookie, userAgent, domain string, err error) {
+	args, err := shellwords.Parse(strings.TrimSpace(input))
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("parse copied cURL command: %w", err)
+	}
+	var data string
+	for i := 0; i < len(args); i++ {
+		current := args[i]
+		if strings.HasPrefix(current, "https://") || strings.HasPrefix(current, "http://") {
+			if parsed, parseErr := url.Parse(current); parseErr == nil && strings.HasSuffix(parsed.Hostname(), ".slack.com") {
+				domain = strings.TrimSuffix(parsed.Hostname(), ".slack.com")
+			}
+		}
+		if (current == "-H" || current == "--header") && i+1 < len(args) {
+			i++
+			name, value, ok := strings.Cut(args[i], ":")
+			if !ok {
+				continue
+			}
+			switch strings.ToLower(strings.TrimSpace(name)) {
+			case "cookie":
+				cookie = cookieValue(value, "d")
+			case "user-agent":
+				userAgent = strings.TrimSpace(value)
+			}
+		}
+		if (current == "-b" || current == "--cookie") && i+1 < len(args) {
+			i++
+			cookie = cookieValue(args[i], "d")
+		}
+		if (current == "--data" || current == "--data-raw" || current == "--data-binary" || current == "-d") && i+1 < len(args) {
+			i++
+			data = args[i]
+		}
+	}
+	if values, parseErr := url.ParseQuery(data); parseErr == nil {
+		token = values.Get("token")
+	}
+	if token == "" || cookie == "" || userAgent == "" {
+		return "", "", "", "", errors.New("the copied request did not contain a token, d cookie, and User-Agent; copy a client.boot request as cURL from Firefox's Network panel")
+	}
+	return token, cookie, userAgent, domain, nil
+}
+
+func cookieValue(header, name string) string {
+	for part := range strings.SplitSeq(header, ";") {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && key == name {
+			return value
+		}
+	}
+	return ""
 }
 
 func diagnoseWorkspace(args []string) error {
@@ -132,13 +266,13 @@ func diagnoseWorkspace(args []string) error {
 	if *domain == "" && flags.NArg() > 0 {
 		*domain = flags.Arg(0)
 	}
-	var token, rawCookie string
+	var token, rawCookie, userAgent string
 	if *saved {
 		meta, secret, err := workspace.New(workspace.DefaultPath()).Active()
 		if err != nil {
 			return err
 		}
-		*domain, token, rawCookie = meta.Domain, secret.Token, secret.Cookie
+		*domain, token, rawCookie, userAgent = meta.Domain, secret.Token, secret.Cookie, secret.UserAgent
 		fmt.Printf("Saved workspace: name=%q id=%s domain=%s stored_api=%s\n", meta.Name, meta.TeamID, meta.Domain, meta.APIURL)
 	} else {
 		*domain = normalizeWorkspaceDomain(*domain)
@@ -162,42 +296,25 @@ func diagnoseWorkspace(args []string) error {
 		}
 		token = strings.TrimSpace(string(tokenBytes))
 		rawCookie = strings.TrimSpace(string(cookieBytes))
+		userAgent = readUserAgent(bufio.NewReader(os.Stdin))
 	}
-	decodedCookie := decodeCookieForDiagnostics(rawCookie)
+	if userAgent == "" {
+		return errors.New("this session predates browser identity storage; link it again with `slacker workspace add --manual --domain <workspace>` before making another Slack request")
+	}
 	fmt.Printf("Token: prefix=%t length=%d fingerprint=%s\n", strings.HasPrefix(token, "xoxc-"), len(token), credentialFingerprint(token))
 	fmt.Printf("Cookie: prefix=%t length=%d percent_encoded=%t fingerprint=%s\n", strings.HasPrefix(rawCookie, "xoxd-"), len(rawCookie), strings.Contains(rawCookie, "%"), credentialFingerprint(rawCookie))
-
-	type attempt struct{ label, cookie, apiURL string }
-	attempts := []attempt{
-		{"raw cookie via slack.com", rawCookie, "https://slack.com/api/"},
-		{"raw cookie via workspace host", rawCookie, "https://" + *domain + ".slack.com/api/"},
+	fmt.Printf("Browser identity: supplied=%t fingerprint=%s\n", userAgent != "", credentialFingerprint(userAgent))
+	client, err := slack.NewClient(slack.Session{Token: token, Cookie: rawCookie, UserAgent: userAgent}, slack.WithRetries(0))
+	if err != nil {
+		return err
 	}
-	if decodedCookie != rawCookie {
-		attempts = append(attempts,
-			attempt{"decoded cookie via slack.com", decodedCookie, "https://slack.com/api/"},
-			attempt{"decoded cookie via workspace host", decodedCookie, "https://" + *domain + ".slack.com/api/"},
-		)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	auth, err := client.Connect(ctx)
+	if err != nil {
+		return fmt.Errorf("client.boot failed: %w", err)
 	}
-	valid := false
-	for _, current := range attempts {
-		client, err := slack.NewClient(slack.Session{Token: token, Cookie: current.cookie, APIURL: current.apiURL}, slack.WithRetries(0))
-		if err != nil {
-			fmt.Printf("FAIL %-36s setup=%v\n", current.label, err)
-			continue
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		auth, err := client.AuthTest(ctx)
-		cancel()
-		if err != nil {
-			fmt.Printf("FAIL %-36s error=%v cookie_length=%d cookie_fingerprint=%s\n", current.label, err, len(current.cookie), credentialFingerprint(current.cookie))
-			continue
-		}
-		fmt.Printf("PASS %-36s team=%q team_id=%s user=%q user_id=%s\n", current.label, auth.Team, auth.TeamID, auth.User, auth.UserID)
-		valid = true
-	}
-	if !valid {
-		return errors.New("all authentication variants failed; compare the fingerprints to ensure each value was copied in full and from the same Firefox profile")
-	}
+	fmt.Printf("PASS client.boot team=%q team_id=%s user=%q user_id=%s\n", auth.Team, auth.TeamID, auth.User, auth.UserID)
 	return nil
 }
 
@@ -239,13 +356,17 @@ func linkWorkspace(store *workspace.Store, args []string) error {
 	if cookie == "" {
 		return errors.New("the Slack d cookie is required")
 	}
+	userAgent := readUserAgent(reader)
+	if userAgent == "" {
+		return errors.New("the Firefox user agent is required so Slack sees the same browser identity")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	token, err := slack.MintToken(ctx, *domain, cookie)
+	token, err := slack.MintToken(ctx, *domain, cookie, userAgent)
 	if err != nil {
 		return fmt.Errorf("Slack did not expose a web token for that cookie; use `slacker workspace add --manual --domain %s` to enter both values: %w", *domain, err)
 	}
-	client, err := slack.NewClient(slack.Session{Token: token, Cookie: cookie})
+	client, err := slack.NewClient(slack.Session{Token: token, Cookie: cookie, UserAgent: userAgent})
 	if err != nil {
 		return err
 	}
@@ -254,7 +375,7 @@ func linkWorkspace(store *workspace.Store, args []string) error {
 		return fmt.Errorf("Slack rejected the linked browser session: %w", err)
 	}
 	meta := workspace.Metadata{TeamID: auth.TeamID, Name: auth.Team, Domain: *domain, APIURL: client.APIURL()}
-	if err := store.Put(meta, workspace.Secret{Token: token, Cookie: cookie}, true); err != nil {
+	if err := store.Put(meta, workspace.Secret{Token: token, Cookie: cookie, UserAgent: userAgent}, true); err != nil {
 		return err
 	}
 	fmt.Printf("Linked %s (%s)\n", meta.Name, meta.TeamID)
@@ -270,11 +391,11 @@ func normalizeWorkspaceDomain(value string) string {
 	return value
 }
 
-func decodeCookieForDiagnostics(value string) string {
-	if decoded, err := url.PathUnescape(value); err == nil {
-		return decoded
-	}
-	return value
+func readUserAgent(reader *bufio.Reader) string {
+	fmt.Println("In the same browser Console, run: navigator.userAgent")
+	fmt.Print("Browser user agent: ")
+	value, _ := reader.ReadString('\n')
+	return strings.TrimSpace(value)
 }
 
 func addWorkspace(store *workspace.Store, args []string) error {
@@ -321,7 +442,7 @@ func addWorkspace(store *workspace.Store, args []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		auth, err := client.Connect(ctx)
 		if err != nil {
-			if refreshed, mintErr := slack.MintToken(ctx, ws.Domain, candidate.Cookie); mintErr == nil {
+			if refreshed, mintErr := slack.MintToken(ctx, ws.Domain, candidate.Cookie, ""); mintErr == nil {
 				candidate.Token = refreshed
 				client, err = slack.NewClient(slack.Session{Token: candidate.Token, Cookie: candidate.Cookie})
 				if err == nil {
@@ -356,19 +477,19 @@ func addWorkspace(store *workspace.Store, args []string) error {
 }
 
 func addBrowserWorkspace(store *workspace.Store, selector string, all bool) error {
-	fmt.Println("Welcome to Slacker.")
-	fmt.Println("1. Your default browser will open Slack's sign-in page.")
-	fmt.Println("2. Sign in and choose the workspace you want to use.")
-	fmt.Println("3. Leave this terminal open; setup continues automatically.")
+	fmt.Println("Checking whether Slacker can import the default browser session…")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	sessions, err := browserlogin.Login(ctx)
 	if err != nil {
-		return fmt.Errorf("%w; automatic browser linking is unavailable, so run `slacker workspace link <workspace-url>`", err)
+		return fmt.Errorf("%w; use `slacker workspace import-curl --domain <workspace>` as the no-profile-access fallback", err)
 	}
 	added := 0
 	for _, session := range sessions {
-		client, err := slack.NewClient(slack.Session{Token: session.Token, Cookie: session.Cookie})
+		if session.UserAgent == "" {
+			continue
+		}
+		client, err := slack.NewClient(slack.Session{Token: session.Token, Cookie: session.Cookie, UserAgent: session.UserAgent})
 		if err != nil {
 			return err
 		}
@@ -392,7 +513,7 @@ func addBrowserWorkspace(store *workspace.Store, selector string, all bool) erro
 		if selector != "" && selector != meta.Name && selector != meta.Domain && selector != meta.TeamID {
 			continue
 		}
-		if err := store.Put(meta, workspace.Secret{Token: session.Token, Cookie: session.Cookie}, added == 0); err != nil {
+		if err := store.Put(meta, workspace.Secret{Token: session.Token, Cookie: session.Cookie, UserAgent: session.UserAgent}, added == 0); err != nil {
 			return err
 		}
 		fmt.Printf("Added %s (%s)\n", meta.Name, meta.TeamID)
@@ -442,10 +563,14 @@ func addManualWorkspace(store *workspace.Store, name, domain string) error {
 	if err != nil {
 		return err
 	}
-	secret := workspace.Secret{Token: strings.TrimSpace(string(tokenBytes)), Cookie: strings.TrimSpace(string(cookieBytes))}
+	userAgent := readUserAgent(reader)
+	if userAgent == "" {
+		return errors.New("the Firefox user agent is required so Slack sees the same browser identity")
+	}
+	secret := workspace.Secret{Token: strings.TrimSpace(string(tokenBytes)), Cookie: strings.TrimSpace(string(cookieBytes)), UserAgent: userAgent}
 	fmt.Printf("Credential check: token_length=%d token_fingerprint=%s cookie_length=%d cookie_fingerprint=%s\n",
 		len(secret.Token), credentialFingerprint(secret.Token), len(secret.Cookie), credentialFingerprint(secret.Cookie))
-	client, err := slack.NewClient(slack.Session{Token: secret.Token, Cookie: secret.Cookie})
+	client, err := slack.NewClient(slack.Session{Token: secret.Token, Cookie: secret.Cookie, UserAgent: secret.UserAgent})
 	if err != nil {
 		return err
 	}
@@ -455,12 +580,7 @@ func addManualWorkspace(store *workspace.Store, name, domain string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("First validation: team=%q team_id=%s user=%q user_id=%s\n", auth.Team, auth.TeamID, auth.User, auth.UserID)
-	secondAuth, err := client.AuthTest(ctx)
-	if err != nil {
-		return fmt.Errorf("session passed once but failed immediate revalidation before saving: %w", err)
-	}
-	fmt.Printf("Second validation: team=%q team_id=%s user=%q user_id=%s\n", secondAuth.Team, secondAuth.TeamID, secondAuth.User, secondAuth.UserID)
+	fmt.Printf("Validated with client.boot: team=%q team_id=%s user=%q user_id=%s\n", auth.Team, auth.TeamID, auth.User, auth.UserID)
 	meta := workspace.Metadata{TeamID: auth.TeamID, Name: auth.Team, Domain: domain, APIURL: client.APIURL()}
 	if meta.Name == "" {
 		meta.Name = name
@@ -478,13 +598,6 @@ func addManualWorkspace(store *workspace.Store, name, domain string) error {
 	if readback.Token != secret.Token || readback.Cookie != secret.Cookie {
 		return errors.New("the operating-system keyring changed the credentials during persistence")
 	}
-	readbackClient, err := slack.NewClient(slack.Session{Token: readback.Token, Cookie: readback.Cookie})
-	if err != nil {
-		return err
-	}
-	if _, err := readbackClient.AuthTest(ctx); err != nil {
-		return fmt.Errorf("session passed before saving but failed immediately after an exact keyring read-back: %w", err)
-	}
 	fmt.Printf("Added %s (%s)\n", meta.Name, meta.TeamID)
 	return nil
 }
@@ -496,12 +609,12 @@ func refreshWorkspace(store *workspace.Store) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	token, err := slack.MintToken(ctx, meta.Domain, secret.Cookie)
+	token, err := slack.MintToken(ctx, meta.Domain, secret.Cookie, secret.UserAgent)
 	if err != nil {
 		return err
 	}
 	secret.Token = token
-	client, err := slack.NewClient(slack.Session{Token: token, Cookie: secret.Cookie, CookieS: secret.CookieS})
+	client, err := slack.NewClient(slack.Session{Token: token, Cookie: secret.Cookie, CookieS: secret.CookieS, UserAgent: secret.UserAgent})
 	if err != nil {
 		return err
 	}
@@ -525,10 +638,13 @@ func activeClient() (workspace.Metadata, *slack.Client, error) {
 	if err != nil {
 		return workspace.Metadata{}, nil, err
 	}
+	if secret.UserAgent == "" {
+		return workspace.Metadata{}, nil, fmt.Errorf("workspace %s was saved without its browser identity; run `slacker workspace add --manual --domain %s` before making another Slack request", meta.Name, meta.Domain)
+	}
 	// Always begin on Slack's global API host. Older Slacker builds persisted
 	// auth.test's Enterprise Grid navigation URL as an API route, which could
 	// validate once during setup and fail on the next launch.
-	client, err := slack.NewClient(slack.Session{Token: secret.Token, Cookie: secret.Cookie, CookieS: secret.CookieS})
+	client, err := slack.NewClient(slack.Session{Token: secret.Token, Cookie: secret.Cookie, CookieS: secret.CookieS, UserAgent: secret.UserAgent})
 	return meta, client, err
 }
 
@@ -574,6 +690,51 @@ func runAPI(args []string) error {
 	return nil
 }
 
+func runSend(selector, message string) error {
+	selector = strings.TrimPrefix(strings.TrimSpace(selector), "#")
+	message = strings.TrimSpace(message)
+	if selector == "" || message == "" {
+		return errors.New("usage: slacker --send --channel <name|id> <message>")
+	}
+	_, client, err := activeClient()
+	if err != nil {
+		return err
+	}
+	channelID := selector
+	if !strings.HasPrefix(selector, "C") && !strings.HasPrefix(selector, "G") && !strings.HasPrefix(selector, "D") {
+		channelID = ""
+		cursor := ""
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			conversations, next, listErr := client.ListConversations(ctx, cursor, 200)
+			cancel()
+			if listErr != nil {
+				return listErr
+			}
+			for _, conversation := range conversations {
+				if conversation.Name == selector {
+					channelID = conversation.ID
+					break
+				}
+			}
+			if channelID != "" || next == "" {
+				break
+			}
+			cursor = next
+		}
+		if channelID == "" {
+			return fmt.Errorf("channel %q was not found", selector)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := client.PostMessage(ctx, channelID, message, ""); err != nil {
+		return err
+	}
+	fmt.Printf("Sent to %s\n", selector)
+	return nil
+}
+
 func runTUI(cfg *config.Config) error {
 	meta, client, err := activeClient()
 	if err != nil {
@@ -612,6 +773,7 @@ func runTUI(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	sections, _ := client.ListChannelSections(ctx)
 	screen, err := tcell.NewScreen()
 	if err != nil {
 		return err
@@ -624,7 +786,7 @@ func runTUI(cfg *config.Config) error {
 	}
 	screen.EnablePaste()
 	tview.Styles = tview.Theme{}
-	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, conversations), tview.WithScreen(screen)).Run()
+	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, conversations, sections, client), tview.WithScreen(screen)).Run()
 }
 
 func printUsage() {
@@ -636,6 +798,7 @@ Usage:
     --desktop                     Import an existing Slack Desktop session
     --manual                      Enter both xoxc token and d cookie
   slacker workspace link [url]    Link using a browser d cookie
+  slacker workspace import-curl   Import a copied browser request
   slacker workspace diagnose     Test entered credentials without saving them
     --saved                       Diagnose the active saved session
   slacker workspace list          List configured workspaces
@@ -643,5 +806,6 @@ Usage:
   slacker workspace refresh       Refresh the active browser token
   slacker doctor                  Validate the active session
   slacker api <method> [k=v ...]  Call a Slack client API method
+  slacker -s -c <channel> <text>  Send a message and exit
   slacker version                 Print the version`)
 }

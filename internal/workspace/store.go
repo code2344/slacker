@@ -24,9 +24,10 @@ type Metadata struct {
 }
 
 type Secret struct {
-	Token   string `json:"token"`
-	Cookie  string `json:"cookie"`
-	CookieS string `json:"cookie_s,omitempty"`
+	Token     string `json:"token"`
+	Cookie    string `json:"cookie"`
+	CookieS   string `json:"cookie_s,omitempty"`
+	UserAgent string `json:"user_agent,omitempty"`
 }
 
 type State struct {

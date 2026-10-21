@@ -16,10 +16,11 @@ import (
 const defaultAPIURL = "https://slack.com/api/"
 
 type Session struct {
-	Token   string
-	Cookie  string
-	CookieS string
-	APIURL  string
+	Token     string
+	Cookie    string
+	CookieS   string
+	APIURL    string
+	UserAgent string
 }
 
 type Client struct {
@@ -50,7 +51,7 @@ func NewClient(session Session, opts ...Option) (*Client, error) {
 	if _, err := url.ParseRequestURI(session.APIURL); err != nil {
 		return nil, fmt.Errorf("invalid Slack API URL: %w", err)
 	}
-	c := &Client{session: session, http: &http.Client{Transport: &BrowserTransport{}, Timeout: 30 * time.Second}, retries: 2}
+	c := &Client{session: session, http: &http.Client{Transport: &BrowserTransport{UserAgent: session.UserAgent}, Timeout: 30 * time.Second}, retries: 2}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -59,11 +60,19 @@ func NewClient(session Session, opts ...Option) (*Client, error) {
 
 func (c *Client) APIURL() string { return c.session.APIURL }
 
-// Connect validates the browser session. API methods remain on slack.com:
-// auth.test can return an Enterprise Grid navigation URL that accepts the
-// initial request but is not a stable API base for subsequent launches.
+// Connect uses the same bootstrap method as Slack's web client. Besides being
+// representative of normal client traffic, client.boot supplies both the user
+// and team identity needed by the CLI.
 func (c *Client) Connect(ctx context.Context) (Auth, error) {
-	return c.AuthTest(ctx)
+	boot, err := c.ClientBoot(ctx)
+	if err != nil {
+		return Auth{}, err
+	}
+	return Auth{
+		OK: true, Team: boot.Team.Name, TeamID: boot.Team.ID,
+		User: boot.Self.Name, UserID: boot.Self.ID,
+		URL: boot.Team.URL,
+	}, nil
 }
 
 func (c *Client) Call(ctx context.Context, method string, params url.Values, out any) error {

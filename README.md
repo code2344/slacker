@@ -7,16 +7,19 @@ require a Slack Marketplace app.
 
 The project is in an early backend-replacement phase. The current build can:
 
-- open an isolated browser window for Slack's normal interactive sign-in;
+- open the operating system's default browser for Slack's normal sign-in;
 - optionally discover signed-in Slack Desktop workspaces on macOS, Linux, and Windows;
 - import the bound browser token and session cookie into the OS keyring;
 - validate the session and discover Enterprise Grid API routing;
 - call Slack's user and internal client APIs with rate-limit handling;
 - list channels, private channels, DMs, and group DMs in the Discordo-style TUI;
+- reproduce Slack's channel-section ordering when the workspace exposes it;
+- load message history and refresh active conversations from Slack's RTM event stream;
+- open threads, read replies, and send channel messages or thread replies;
 - keep one active workspace and switch it from the CLI.
 
-Message history, the live WebSocket, sending, threads, and image rendering are
-the next implementation slices.
+User resolution, unread/read state, reactions, search, uploads, and inline image
+rendering remain active implementation areas.
 
 ## Build
 
@@ -62,10 +65,27 @@ its Slack cookie:
 slacker workspace link https://example.slack.com
 ```
 
+On macOS, automatic Firefox import requires the terminal running Slacker to
+have access to Firefox's profile directory. If macOS blocks it, Slacker now
+fails immediately with the relevant System Settings location instead of
+opening a browser and silently polling.
+
+The simplest fallback imports everything from one browser request. In
+Firefox's Network panel, reload Slack, right-click the `client.boot` request,
+choose **Copy Value → Copy as cURL**, then run:
+
+```sh
+slacker workspace import-curl --domain example
+```
+
+Slacker reads the copied command from the clipboard and extracts the paired
+token, cookie, and browser identity without printing them.
+
 Slacker will show where to find the `d` cookie in Firefox Developer Tools,
-derive the corresponding web-client token, validate the pair, and only then
-save it. If Slack no longer exposes a token from the workspace page, the
-explicit fallback accepts both values:
+derive the corresponding web-client token, and ask for `navigator.userAgent`
+so its requests retain the browser identity bound to the session. If Slack no
+longer exposes a token from the workspace page, the explicit fallback accepts
+both values:
 
 ```sh
 slacker workspace add --manual --domain example
@@ -78,10 +98,11 @@ slacker workspace diagnose --domain example
 slacker workspace diagnose --saved
 ```
 
-The diagnostic checks raw and URL-decoded cookie forms against both Slack's
-global API host and the workspace host. It reports lengths, short SHA-256
-fingerprints, and Slack's response for each attempt, so truncated or mismatched
-values can be identified without exposing them again.
+The diagnostic makes one `client.boot` request, matching Slack's web client,
+and reports credential lengths and short SHA-256 fingerprints without printing
+the credentials. Older builds tried several `auth.test` variants in one run;
+do not use those builds because Slack can treat that traffic and a mismatched
+browser identity as suspicious.
 
 Workspace commands:
 
@@ -97,6 +118,15 @@ Open the active workspace with:
 
 ```sh
 slacker
+```
+
+Send a message without opening the TUI (quote `#channel` so the shell does not
+treat it as a comment):
+
+```sh
+slacker --send --channel general "hello from the terminal"
+slacker -s -c '#general' "hello from the terminal"
+slacker -s -c C0123456789 "hello from the terminal"
 ```
 
 For protocol diagnostics, an arbitrary authenticated method can be called with:

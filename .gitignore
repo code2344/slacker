@@ -1,6 +1,7 @@
 slacker
 slacker.exe
 dist/
+.DS_Store
 
 .golangci*
 

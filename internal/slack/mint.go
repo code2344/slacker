@@ -11,11 +11,11 @@ import (
 
 var apiTokenRE = regexp.MustCompile(`"api_token":"([^"]+)"`)
 
-func MintToken(ctx context.Context, domain, cookie string) (string, error) {
+func MintToken(ctx context.Context, domain, cookie, userAgent string) (string, error) {
 	if domain == "" || cookie == "" {
 		return "", fmt.Errorf("workspace domain and d cookie are required")
 	}
-	client := &http.Client{Transport: &BrowserTransport{}, Timeout: 20 * time.Second}
+	client := &http.Client{Transport: &BrowserTransport{UserAgent: userAgent}, Timeout: 20 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+domain+".slack.com", nil)
 	if err != nil {
 		return "", err
