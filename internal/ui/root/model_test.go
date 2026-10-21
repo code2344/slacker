@@ -67,13 +67,23 @@ func TestConversationHeaderIncludesTopicAndMembers(t *testing.T) {
 }
 
 func TestKittyImagePayloadIsChunkedAndSized(t *testing.T) {
-	payload := kittyImagePayload(make([]byte, 5000), 80, 24)
+	payload := kittyImagePayload(make([]byte, 5000), 42, 40, 12)
 	encoded := string(payload)
-	if !strings.Contains(encoded, "a=T,f=100,q=2,c=80,r=24,m=1;") {
+	if !strings.Contains(encoded, "a=T,f=100,q=2,U=1,C=1,i=42,c=40,r=12,m=1;") {
 		t.Fatalf("first Kitty chunk missing sizing: %q", encoded[:min(120, len(encoded))])
 	}
 	if !strings.Contains(encoded, "q=2,m=0;") {
 		t.Fatal("final Kitty chunk is missing")
+	}
+}
+
+func TestKittyPlaceholderEncodesImageRowsAndColumns(t *testing.T) {
+	lines := kittyPlaceholderLines(kittyPreview{imageID: 42, columns: 2, rows: 2})
+	if len(lines) != 2 || len(lines[0]) != 3 {
+		t.Fatalf("placeholder dimensions = %d rows, %d segments", len(lines), len(lines[0]))
+	}
+	if lines[0][1].Text != string([]rune{0x10EEEE, kittyDiacritics[0], kittyDiacritics[0]}) || lines[1][2].Text != string([]rune{0x10EEEE, kittyDiacritics[1], kittyDiacritics[1]}) {
+		t.Fatal("placeholder row/column diacritics are incorrect")
 	}
 }
 

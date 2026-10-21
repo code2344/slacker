@@ -53,7 +53,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [~] File names and MIME types in messages
 - [x] Authenticated file download and default-viewer open actions
 - [ ] File upload, drag/drop, clipboard paste, and filename anonymisation
-- [~] Full-resolution Kitty-protocol image viewer; inline placement, iTerm2 images, and Sixel remain planned
+- [~] Inline Kitty-protocol images; iTerm2 images, Sixel, and non-graphics fallbacks remain planned
 - [x] File rows identify images and open them in the system image viewer
 - [ ] Text fallback for terminals without graphics support
 - [ ] Image galleries, video/audio playback handoff, clips, and transcripts

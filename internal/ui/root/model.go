@@ -1,11 +1,11 @@
 package root
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"hash/fnv"
 	"html"
 	"image"
 	_ "image/gif"
@@ -25,12 +25,12 @@ import (
 	"github.com/ayn2op/tview/flex"
 	"github.com/ayn2op/tview/layers"
 	"github.com/ayn2op/tview/modal"
+	styledtext "github.com/ayn2op/tview/text"
 	"github.com/ayn2op/tview/tree"
 	"github.com/code2344/slacker/internal/config"
 	"github.com/code2344/slacker/internal/slack"
 	"github.com/code2344/slacker/internal/ui"
 	"github.com/gdamore/tcell/v3"
-	"golang.org/x/term"
 )
 
 // Model is the first Slack-backed shell of the three-pane interface.
@@ -71,11 +71,21 @@ type Model struct {
 	pendingMessage     *messageReference
 	stream             *slack.Realtime
 	realtimeFailures   int
+	imagePreviews      map[string]kittyPreview
+	kittyGraphics      bool
+}
+
+type kittyPreview struct {
+	imageID uint32
+	columns int
+	rows    int
+	pngData []byte
 }
 
 type historyLoadedMsg struct {
 	conversation slack.Conversation
 	messages     []slack.Message
+	previews     map[string]kittyPreview
 	hasMore      bool
 	err          error
 }
@@ -109,6 +119,7 @@ type threadLoadedMsg struct {
 	conversation slack.Conversation
 	timestamp    string
 	messages     []slack.Message
+	previews     map[string]kittyPreview
 	err          error
 }
 type userLoadedMsg struct {
@@ -135,15 +146,14 @@ type searchLoadedMsg struct {
 	err          error
 }
 type fileOpenedMsg struct {
-	path    string
-	preview bool
-	err     error
+	path string
+	err  error
 }
-type imageViewedMsg struct{ err error }
 type dmOpenedMsg struct {
 	conversation slack.Conversation
 	err          error
 }
+type kittyUploadedMsg struct{}
 
 type realtimeConnectedMsg struct {
 	stream *slack.Realtime
@@ -179,6 +189,7 @@ func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversation
 		profileLookups: make(map[string]bool),
 		counts:         counts,
 		conversations:  make(map[string]slack.Conversation, len(conversations)),
+		imagePreviews:  make(map[string]kittyPreview),
 	}
 	for _, field := range profileFields {
 		m.profileFields[field.ID] = field
@@ -342,6 +353,8 @@ func orderSections(sections []slack.ChannelSection) []slack.ChannelSection {
 func (m *Model) Update(msg tview.Msg) tview.Cmd {
 	switch msg := msg.(type) {
 	case tview.InitMsg:
+		terminal := strings.ToLower(msg.TerminalName + " " + os.Getenv("TERM") + " " + os.Getenv("TERM_PROGRAM"))
+		m.kittyGraphics = strings.Contains(terminal, "kitty") || strings.Contains(terminal, "ghostty") || strings.Contains(terminal, "wezterm")
 		return tview.Batch(tview.SetTitle("slacker"), m.connectRealtime())
 	case tview.KeyMsg:
 		if msg.Key() == tcell.KeyCtrlC {
@@ -501,6 +514,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.setMessageNotice("Could not load messages: " + msg.err.Error())
 			break
 		}
+		for id, preview := range msg.previews {
+			m.imagePreviews[id] = preview
+		}
 		if userIDs := m.unresolvedUserIDs(msg.messages); len(userIDs) > 0 {
 			m.setMessageNotice("Resolving message authors…")
 			return m.loadAuthors(userIDs, &msg, nil)
@@ -509,6 +525,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.showMessages(msg.conversation, msg.messages, msg.hasMore, false)
 		m.composer.SetDisabled(false)
 		m.composer.SetTitle("Message " + m.conversationTitle(msg.conversation))
+		return uploadKittyPreviews(msg.previews)
 	case messageSentMsg:
 		if msg.conversation.ID != m.activeConversation {
 			break
@@ -561,12 +578,16 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.setMessageNotice("Could not load thread: " + msg.err.Error())
 			break
 		}
+		for id, preview := range msg.previews {
+			m.imagePreviews[id] = preview
+		}
 		if userIDs := m.unresolvedUserIDs(msg.messages); len(userIDs) > 0 {
 			return m.loadAuthors(userIDs, nil, &msg)
 		}
 		m.activeThread = msg.timestamp
 		m.showThread(msg.conversation, msg.messages)
 		m.openInspector()
+		return uploadKittyPreviews(msg.previews)
 	case userLoadedMsg:
 		if msg.err != nil {
 			m.showProfileError(msg.userID, msg.err)
@@ -606,18 +627,8 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 	case fileOpenedMsg:
 		if msg.err != nil {
 			m.messages.SetTitle("File failed: " + msg.err.Error())
-		} else if msg.preview {
-			return tview.Suspend(func() tview.Msg {
-				return imageViewedMsg{err: showKittyImage(msg.path)}
-			})
 		} else {
 			m.messages.SetTitle("Opened " + msg.path)
-		}
-	case imageViewedMsg:
-		if msg.err != nil {
-			m.messages.SetTitle("Image preview failed: " + msg.err.Error())
-		} else {
-			m.messages.SetTitle("Messages")
 		}
 	case realtimeConnectedMsg:
 		if msg.err != nil {
@@ -808,7 +819,8 @@ func (m *Model) loadThread(conversation slack.Conversation, timestamp string) tv
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		messages, _, err := m.client.ConversationReplies(ctx, conversation.ID, timestamp, 100)
-		return threadLoadedMsg{conversation: conversation, timestamp: timestamp, messages: messages, err: err}
+		previews := m.loadKittyPreviews(ctx, messages)
+		return threadLoadedMsg{conversation: conversation, timestamp: timestamp, messages: messages, previews: previews, err: err}
 	}
 }
 
@@ -877,6 +889,11 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 				label = "image"
 			}
 			root.AddChild(tree.NewNode("  [" + label + "] " + name + " — open").SetReference(fileReference{file: file}))
+			if preview, ok := m.imagePreviews[file.ID]; ok {
+				for _, line := range kittyPlaceholderLines(preview) {
+					root.AddChild(tree.NewNode("").SetLine(line).SetSelectable(false))
+				}
+			}
 		}
 		if len(message.Reactions) > 0 {
 			root.AddChild(tree.NewNode("  " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
@@ -949,6 +966,11 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 				kind = "image"
 			}
 			root.AddChild(tree.NewNode("  [" + kind + "] " + fileName(file) + " — open").SetReference(fileReference{file: file}))
+			if preview, ok := m.imagePreviews[file.ID]; ok {
+				for _, line := range kittyPlaceholderLines(preview) {
+					root.AddChild(tree.NewNode("").SetLine(line).SetSelectable(false))
+				}
+			}
 		}
 		if len(message.Reactions) > 0 {
 			root.AddChild(tree.NewNode("  " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
@@ -1329,9 +1351,6 @@ func (m *Model) downloadAndOpen(file slack.File) tview.Cmd {
 		if err := os.Rename(temporaryName, target); err != nil {
 			return fileOpenedMsg{err: err}
 		}
-		if strings.HasPrefix(file.Mimetype, "image/") {
-			return fileOpenedMsg{path: target, preview: true}
-		}
 		if err := openLocalFile(target); err != nil {
 			return fileOpenedMsg{path: target, err: err}
 		}
@@ -1372,33 +1391,7 @@ func openLocalFile(path string) error {
 	return command.Start()
 }
 
-func showKittyImage(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	img, _, err := image.Decode(bytes.NewReader(data))
-	if err != nil {
-		return fmt.Errorf("decode image: %w", err)
-	}
-	var encoded bytes.Buffer
-	if err := png.Encode(&encoded, img); err != nil {
-		return fmt.Errorf("encode image for terminal: %w", err)
-	}
-	width, height, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil || width < 10 || height < 6 {
-		width, height = 80, 24
-	}
-	columns, rows := max(1, width-4), max(1, height-3)
-	fmt.Fprint(os.Stdout, "\x1b[2J\x1b[H")
-	_, _ = os.Stdout.Write(kittyImagePayload(encoded.Bytes(), columns, rows))
-	fmt.Fprintf(os.Stdout, "\x1b[%d;1HPress Enter to return to Slacker…", height)
-	_, readErr := bufio.NewReader(os.Stdin).ReadString('\n')
-	fmt.Fprint(os.Stdout, "\x1b_Ga=d,d=A,q=2\x1b\\\x1b[2J\x1b[H")
-	return readErr
-}
-
-func kittyImagePayload(pngData []byte, columns, rows int) []byte {
+func kittyImagePayload(pngData []byte, imageID uint32, columns, rows int) []byte {
 	payload := base64.StdEncoding.EncodeToString(pngData)
 	var output bytes.Buffer
 	for first := true; len(payload) > 0; first = false {
@@ -1409,13 +1402,123 @@ func kittyImagePayload(pngData []byte, columns, rows int) []byte {
 			more = 1
 		}
 		if first {
-			fmt.Fprintf(&output, "\x1b_Ga=T,f=100,q=2,c=%d,r=%d,m=%d;%s\x1b\\", columns, rows, more, chunk)
+			fmt.Fprintf(&output, "\x1b_Ga=T,f=100,q=2,U=1,C=1,i=%d,c=%d,r=%d,m=%d;%s\x1b\\", imageID, columns, rows, more, chunk)
 		} else {
 			fmt.Fprintf(&output, "\x1b_Gq=2,m=%d;%s\x1b\\", more, chunk)
 		}
 		payload = rest
 	}
 	return output.Bytes()
+}
+
+var kittyDiacritics = []rune{
+	0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F,
+	0x0346, 0x034A, 0x034B, 0x034C, 0x0350, 0x0351, 0x0352, 0x0357,
+	0x035B, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369,
+	0x036A, 0x036B, 0x036C, 0x036D, 0x036E, 0x036F, 0x0483, 0x0484,
+	0x0485, 0x0486, 0x0487, 0x0592, 0x0593, 0x0594, 0x0595, 0x0597,
+	0x0598, 0x0599, 0x059C, 0x059D, 0x059E, 0x059F, 0x05A0, 0x05A1,
+	0x05A8, 0x05A9, 0x05AB, 0x05AC, 0x05AF, 0x05C4, 0x0610, 0x0611,
+	0x0612, 0x0613, 0x0614, 0x0615, 0x0616, 0x0617, 0x0657, 0x0658,
+}
+
+func kittyPlaceholderLines(preview kittyPreview) []styledtext.Line {
+	red := int32((preview.imageID >> 16) & 0xff)
+	green := int32((preview.imageID >> 8) & 0xff)
+	blue := int32(preview.imageID & 0xff)
+	style := tcell.StyleDefault.Foreground(tcell.NewRGBColor(red, green, blue))
+	lines := make([]styledtext.Line, preview.rows)
+	for row := range preview.rows {
+		line := styledtext.Line{styledtext.NewSegment("  ", tcell.StyleDefault)}
+		for column := range preview.columns {
+			cell := string([]rune{0x10EEEE, kittyDiacritics[row], kittyDiacritics[column]})
+			line = append(line, styledtext.NewSegment(cell, style))
+		}
+		lines[row] = line
+	}
+	return lines
+}
+
+func uploadKittyPreviews(previews map[string]kittyPreview) tview.Cmd {
+	if len(previews) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(previews))
+	for id := range previews {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	commands := make([]tview.Cmd, 0, len(ids)+1)
+	for _, id := range ids {
+		preview := previews[id]
+		commands = append(commands, tview.Raw(kittyImagePayload(preview.pngData, preview.imageID, preview.columns, preview.rows)))
+	}
+	commands = append(commands, func() tview.Msg { return kittyUploadedMsg{} })
+	return tview.Sequence(commands...)
+}
+
+func (m *Model) loadKittyPreviews(ctx context.Context, messages []slack.Message) map[string]kittyPreview {
+	previews := make(map[string]kittyPreview)
+	if !m.kittyGraphics {
+		return previews
+	}
+	for _, message := range messages {
+		for _, file := range message.Files {
+			if len(previews) >= 4 || file.ID == "" || !strings.HasPrefix(file.Mimetype, "image/") || file.Size > 12*1024*1024 {
+				continue
+			}
+			target := file.URLPrivateDownload
+			if target == "" {
+				target = file.URLPrivate
+			}
+			if target == "" {
+				continue
+			}
+			cacheRoot, _ := os.UserCacheDir()
+			cachePath := ""
+			var encodedData []byte
+			if cacheRoot != "" {
+				cachePath = filepath.Join(cacheRoot, "slacker", "images", filepath.Base(file.ID)+".png")
+				encodedData, _ = os.ReadFile(cachePath)
+			}
+			if len(encodedData) == 0 {
+				var downloaded bytes.Buffer
+				if err := m.client.Download(ctx, target, &downloaded); err != nil || downloaded.Len() > 12*1024*1024 {
+					continue
+				}
+				img, _, err := image.Decode(bytes.NewReader(downloaded.Bytes()))
+				if err != nil {
+					continue
+				}
+				var encoded bytes.Buffer
+				if png.Encode(&encoded, img) != nil {
+					continue
+				}
+				encodedData = encoded.Bytes()
+				if cachePath != "" && os.MkdirAll(filepath.Dir(cachePath), 0700) == nil {
+					_ = os.WriteFile(cachePath, encodedData, 0600)
+				}
+			}
+			img, _, err := image.Decode(bytes.NewReader(encodedData))
+			if err != nil {
+				continue
+			}
+			bounds := img.Bounds()
+			if bounds.Dx() < 1 || bounds.Dy() < 1 {
+				continue
+			}
+			columns := min(40, max(8, bounds.Dx()/20))
+			rows := min(16, max(3, columns*bounds.Dy()/bounds.Dx()/2))
+			hash := fnv.New32a()
+			_, _ = hash.Write([]byte(file.ID))
+			imageID := hash.Sum32() & 0xFFFFFF
+			if imageID == 0 {
+				imageID = 1
+			}
+			previews[file.ID] = kittyPreview{imageID: imageID, columns: columns, rows: rows, pngData: encodedData}
+		}
+	}
+	return previews
 }
 
 func (m *Model) loadProfileDetails(userID string) tview.Cmd {
@@ -1570,7 +1673,8 @@ func (m *Model) loadHistory(conversation slack.Conversation) tview.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		messages, hasMore, err := m.client.ConversationHistory(ctx, conversation.ID, 100)
-		return historyLoadedMsg{conversation: conversation, messages: messages, hasMore: hasMore, err: err}
+		previews := m.loadKittyPreviews(ctx, messages)
+		return historyLoadedMsg{conversation: conversation, messages: messages, previews: previews, hasMore: hasMore, err: err}
 	}
 }
 
