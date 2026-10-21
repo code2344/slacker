@@ -1,10 +1,36 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/code2344/slacker/internal/slack"
 )
+
+func TestListAllConversationsFollowsCursor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("cursor") == "next-page" {
+			fmt.Fprint(w, `{"ok":true,"channels":[{"id":"D1","is_im":true,"user":"U1"}],"response_metadata":{"next_cursor":""}}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"channels":[{"id":"C1","name":"general"}],"response_metadata":{"next_cursor":"next-page"}}`)
+	}))
+	defer server.Close()
+	client, err := slack.NewClient(slack.Session{Token: "xoxc-test", Cookie: "xoxd-test", APIURL: server.URL + "/api/"}, slack.WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversations, err := listAllConversations(context.Background(), client)
+	if err != nil || len(conversations) != 2 || conversations[1].ID != "D1" {
+		t.Fatalf("conversations = %#v, err = %v", conversations, err)
+	}
+}
 
 func TestMergeConversationsAddsBootDMsAndReplacesDuplicates(t *testing.T) {
 	listed := []slack.Conversation{{ID: "C1", Name: "old"}}

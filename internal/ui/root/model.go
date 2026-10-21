@@ -204,6 +204,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	channels := tree.NewNode("Channels").SetExpanded(true).SetSelectable(false)
 	dms := tree.NewNode("Direct messages").SetExpanded(true).SetSelectable(false)
 	m.directMessages = dms
+	root.AddChild(dms)
 	sectionNodes := map[string]*tree.Node{}
 	assigned := map[string]bool{}
 	for _, section := range sections {
@@ -219,7 +220,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 		}
 	}
 	if len(sections) == 0 {
-		root.AddChild(channels).AddChild(dms)
+		root.AddChild(channels)
 	}
 
 	byID := make(map[string]slack.Conversation, len(conversations))
@@ -282,9 +283,6 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 		} else {
 			addConversation(channels, conversation)
 		}
-	}
-	if len(sections) > 0 && len(dms.Children()) > 0 {
-		root.AddChild(dms)
 	}
 
 	m.sidebar.SetRoot(root).SetTopLevel(1).SetTitle(workspaceName)

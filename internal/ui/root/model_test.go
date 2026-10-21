@@ -116,7 +116,7 @@ func TestDirectMessagesStayInDedicatedSidebarGroup(t *testing.T) {
 	if len(m.directMessages.Children()) != 1 || m.directMessages.Children()[0].Reference() != "D1" {
 		t.Fatalf("DM rows = %#v", m.directMessages.Children())
 	}
-	if got := m.sidebar.Root().Children()[len(m.sidebar.Root().Children())-1]; got != m.directMessages {
+	if got := m.sidebar.Root().Children()[0]; got != m.directMessages {
 		t.Fatal("direct messages group is not attached to the sidebar")
 	}
 }

@@ -770,7 +770,7 @@ func runTUI(cfg *config.Config) error {
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	conversations, _, err := client.ListConversations(ctx, "", 200)
+	conversations, err := listAllConversations(ctx, client)
 	if err != nil {
 		return err
 	}
@@ -800,6 +800,22 @@ func runTUI(cfg *config.Config) error {
 	screen.EnablePaste()
 	tview.Styles = tview.Theme{}
 	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, auth.UserID, conversations, sections, users, profileFields, counts, client), tview.WithScreen(screen)).Run()
+}
+
+func listAllConversations(ctx context.Context, client *slack.Client) ([]slack.Conversation, error) {
+	var conversations []slack.Conversation
+	cursor := ""
+	for {
+		page, next, err := client.ListConversations(ctx, cursor, 200)
+		if err != nil {
+			return nil, err
+		}
+		conversations = append(conversations, page...)
+		if next == "" {
+			return conversations, nil
+		}
+		cursor = next
+	}
 }
 
 func mergeConversations(groups ...[]slack.Conversation) []slack.Conversation {
