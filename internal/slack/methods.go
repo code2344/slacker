@@ -94,21 +94,49 @@ type File struct {
 }
 
 type Reaction struct {
-	Name  string `json:"name"`
-	Count int    `json:"count"`
+	Name  string   `json:"name"`
+	Count int      `json:"count"`
+	Users []string `json:"users"`
+}
+
+type MessageEdited struct {
+	User      string `json:"user"`
+	Timestamp string `json:"ts"`
 }
 
 type Message struct {
-	Type       string     `json:"type"`
-	Subtype    string     `json:"subtype"`
-	User       string     `json:"user"`
-	Username   string     `json:"username"`
-	Text       string     `json:"text"`
-	Timestamp  string     `json:"ts"`
-	ThreadTS   string     `json:"thread_ts"`
-	ReplyCount int        `json:"reply_count"`
-	Files      []File     `json:"files"`
-	Reactions  []Reaction `json:"reactions"`
+	Type       string         `json:"type"`
+	Subtype    string         `json:"subtype"`
+	User       string         `json:"user"`
+	Username   string         `json:"username"`
+	Text       string         `json:"text"`
+	Timestamp  string         `json:"ts"`
+	ThreadTS   string         `json:"thread_ts"`
+	ReplyCount int            `json:"reply_count"`
+	Files      []File         `json:"files"`
+	Reactions  []Reaction     `json:"reactions"`
+	Edited     *MessageEdited `json:"edited"`
+}
+
+func (c *Client) UpdateMessage(ctx context.Context, channel, timestamp, text string) (Message, error) {
+	params := url.Values{"channel": {channel}, "ts": {timestamp}, "text": {text}}
+	var result struct {
+		Message Message `json:"message"`
+	}
+	err := c.Call(ctx, "chat.update", params, &result)
+	return result.Message, err
+}
+
+func (c *Client) DeleteMessage(ctx context.Context, channel, timestamp string) error {
+	return c.Call(ctx, "chat.delete", url.Values{"channel": {channel}, "ts": {timestamp}}, nil)
+}
+
+func (c *Client) AddReaction(ctx context.Context, channel, timestamp, name string) error {
+	return c.Call(ctx, "reactions.add", url.Values{"channel": {channel}, "timestamp": {timestamp}, "name": {name}}, nil)
+}
+
+func (c *Client) RemoveReaction(ctx context.Context, channel, timestamp, name string) error {
+	return c.Call(ctx, "reactions.remove", url.Values{"channel": {channel}, "timestamp": {timestamp}, "name": {name}}, nil)
 }
 
 func (c *Client) ConversationHistory(ctx context.Context, channel string, limit int) ([]Message, bool, error) {

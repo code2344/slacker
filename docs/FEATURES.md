@@ -12,7 +12,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Thread history and thread replies
 - [~] DM display names and message author names
 - [~] Unread and mention markers
-- [ ] Slack-style right-hand thread pane
+- [x] Slack-style right-hand thread pane
 - [ ] Mark channel/thread read and preserve read position
 - [ ] More-unreads navigation and unread-only view
 - [ ] Browse/search/join/leave/create/archive channels
@@ -24,19 +24,20 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 
 - [x] Plain-text channel messages and replies
 - [~] Slack mrkdwn display
-- [ ] Edit and delete messages
+- [x] Edit and delete your own messages
 - [ ] Rich composer: bold, italic, strike, code, quotes, lists, and links
 - [ ] Mentions and channel/user/emoji autocomplete
 - [ ] Scheduled messages and drafts
 - [ ] Forward/share messages and copy permalinks
 - [ ] Pin/unpin, save-for-later, reminders, and follow-thread controls
-- [ ] Message actions, shortcuts, app actions, and workflow actions
+- [~] Keyboard message actions; Slack app/workflow actions remain planned
 - [ ] Translation and accessibility alt-text prompts
 
 ## Reactions and emoji
 
-- [~] Display reaction names and counts
-- [ ] Add/remove reactions and show reacting users
+- [x] Display reaction names, counts, and whether you reacted
+- [x] Add common reactions and remove your own reactions
+- [ ] Full emoji picker and reacting-user list
 - [ ] Workspace emoji, aliases, skin tones, and emoji picker
 
 ## People and presence

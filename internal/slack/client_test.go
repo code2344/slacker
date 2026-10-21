@@ -157,6 +157,58 @@ func TestConversationRepliesAndThreadReply(t *testing.T) {
 	}
 }
 
+func TestMessageMutations(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, r.URL.Path)
+		if r.Form.Get("channel") != "C123" {
+			t.Errorf("channel = %q", r.Form.Get("channel"))
+		}
+		switch r.URL.Path {
+		case "/api/chat.update":
+			if r.Form.Get("ts") != "1710000000.1" || r.Form.Get("text") != "edited" {
+				t.Errorf("update form = %#v", r.Form)
+			}
+			io.WriteString(w, `{"ok":true,"message":{"text":"edited"}}`)
+		case "/api/chat.delete":
+			if r.Form.Get("ts") != "1710000000.1" {
+				t.Errorf("delete form = %#v", r.Form)
+			}
+			io.WriteString(w, `{"ok":true}`)
+		case "/api/reactions.add", "/api/reactions.remove":
+			if r.Form.Get("timestamp") != "1710000000.1" || r.Form.Get("name") != "thumbsup" {
+				t.Errorf("reaction form = %#v", r.Form)
+			}
+			io.WriteString(w, `{"ok":true}`)
+		default:
+			t.Errorf("path = %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.UpdateMessage(context.Background(), "C123", "1710000000.1", "edited"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeleteMessage(context.Background(), "C123", "1710000000.1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.AddReaction(context.Background(), "C123", "1710000000.1", "thumbsup"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RemoveReaction(context.Background(), "C123", "1710000000.1", "thumbsup"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(paths, ","); got != "/api/chat.update,/api/chat.delete,/api/reactions.add,/api/reactions.remove" {
+		t.Fatalf("paths = %q", got)
+	}
+}
+
 func TestListChannelSections(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/users.channelSections.list" {

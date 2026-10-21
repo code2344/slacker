@@ -750,7 +750,7 @@ func runTUI(cfg *config.Config) error {
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	_, connectErr := client.Connect(ctx)
+	auth, connectErr := client.Connect(ctx)
 	cancel()
 	if connectErr != nil {
 		fmt.Printf("The saved session for %s is no longer valid.\n", meta.Name)
@@ -763,7 +763,8 @@ func runTUI(cfg *config.Config) error {
 		}
 		ctx, cancel = context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
-		if _, err := client.Connect(ctx); err != nil {
+		auth, err = client.Connect(ctx)
+		if err != nil {
 			return err
 		}
 	}
@@ -793,7 +794,7 @@ func runTUI(cfg *config.Config) error {
 	}
 	screen.EnablePaste()
 	tview.Styles = tview.Theme{}
-	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, conversations, sections, users, counts, client), tview.WithScreen(screen)).Run()
+	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, auth.UserID, conversations, sections, users, counts, client), tview.WithScreen(screen)).Run()
 }
 
 func printUsage() {

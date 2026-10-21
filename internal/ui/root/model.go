@@ -3,6 +3,8 @@ package root
 import (
 	"context"
 	"fmt"
+	"html"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -38,6 +40,11 @@ type Model struct {
 	conversations      map[string]slack.Conversation
 	activeConversation string
 	activeThread       string
+	selfUserID         string
+	editing            *messageReference
+	editingInThread    bool
+	pendingAction      string
+	pendingMessage     *messageReference
 	stream             *slack.Realtime
 	realtimeFailures   int
 }
@@ -55,9 +62,17 @@ type messageSentMsg struct {
 	err          error
 }
 
-type messageReference struct {
+type messageMutatedMsg struct {
 	conversation slack.Conversation
-	message      slack.Message
+	thread       string
+	action       string
+	err          error
+}
+
+type messageReference struct {
+	conversation  slack.Conversation
+	message       slack.Message
+	contextThread string
 }
 type profileReference struct{ userID string }
 type threadBackReference struct{ conversation slack.Conversation }
@@ -77,7 +92,7 @@ type realtimeEventMsg struct {
 	err   error
 }
 
-func NewModel(cfg *config.Config, workspaceName string, conversations []slack.Conversation, sections []slack.ChannelSection, users map[string]slack.User, counts map[string]slack.ConversationCount, client *slack.Client) *Model {
+func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversations []slack.Conversation, sections []slack.ChannelSection, users map[string]slack.User, counts map[string]slack.ConversationCount, client *slack.Client) *Model {
 	m := &Model{
 		Layers:         layers.New(),
 		cfg:            cfg,
@@ -90,6 +105,7 @@ func NewModel(cfg *config.Config, workspaceName string, conversations []slack.Co
 		threadMessages: tree.NewModel(),
 		threadComposer: tview.NewTextArea(),
 		client:         client,
+		selfUserID:     selfUserID,
 		users:          users,
 		counts:         counts,
 		conversations:  make(map[string]slack.Conversation, len(conversations)),
@@ -250,14 +266,48 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		if msg.Key() == tcell.KeyCtrlC {
 			return tview.Quit()
 		}
+		if msg.Key() == tcell.KeyEscape && m.editing != nil {
+			m.cancelEdit()
+			return nil
+		}
 		if msg.Key() == tcell.KeyEscape && m.activeThread != "" {
 			m.closeInspector()
 			return nil
+		}
+		if reference, ok := m.selectedMessage(); ok {
+			switch msg.Str() {
+			case "e":
+				if reference.message.User == m.selfUserID {
+					m.beginEdit(reference)
+				}
+				return nil
+			case "d":
+				if reference.message.User == m.selfUserID {
+					m.pendingAction, m.pendingMessage = "delete", &reference
+					m.AddLayer(modal.NewModel().SetText("Delete this message? This cannot be undone.").AddButtons([]string{"Delete", "Cancel"}), layers.WithName("message-action"), layers.WithResize(true), layers.WithOverlay())
+				}
+				return nil
+			case "r":
+				m.pendingAction, m.pendingMessage = "react", &reference
+				m.AddLayer(modal.NewModel().SetText("Add a reaction").AddButtons([]string{"thumbsup", "heart", "joy", "tada", "eyes", "Cancel"}), layers.WithName("message-action"), layers.WithResize(true), layers.WithOverlay())
+				return nil
+			case "-":
+				own := ownReactionNames(reference.message.Reactions, m.selfUserID)
+				if len(own) > 0 {
+					m.pendingAction, m.pendingMessage = "unreact", &reference
+					m.AddLayer(modal.NewModel().SetText("Remove one of your reactions").AddButtons(append(own, "Cancel")), layers.WithName("message-action"), layers.WithResize(true), layers.WithOverlay())
+				}
+				return nil
+			}
 		}
 		if msg.Key() == tcell.KeyEnter && m.activeThread != "" && m.main.Focused() == 2 && m.inspector.Focused() == 1 {
 			text := strings.TrimSpace(m.threadComposer.Text())
 			if text != "" {
 				m.threadComposer.SetDisabled(true)
+				if m.editing != nil && m.editingInThread {
+					m.threadComposer.SetTitle("Saving edit…")
+					return m.updateMessage(*m.editing, text)
+				}
 				return m.sendMessage(m.conversations[m.activeConversation], text, m.activeThread)
 			}
 		}
@@ -266,6 +316,10 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			if text != "" {
 				conversation := m.conversations[m.activeConversation]
 				m.composer.SetDisabled(true)
+				if m.editing != nil {
+					m.composer.SetTitle("Saving edit…")
+					return m.updateMessage(*m.editing, text)
+				}
 				m.composer.SetTitle("Sending…")
 				return m.sendMessage(conversation, text, m.activeThread)
 			}
@@ -330,6 +384,30 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			return m.loadThread(msg.conversation, msg.thread)
 		}
 		return m.loadHistory(msg.conversation)
+	case messageMutatedMsg:
+		m.composer.SetDisabled(false)
+		m.threadComposer.SetDisabled(false)
+		if msg.err != nil {
+			if m.editingInThread {
+				m.threadComposer.SetTitle(msg.action + " failed: " + msg.err.Error())
+			} else {
+				m.composer.SetTitle(msg.action + " failed: " + msg.err.Error())
+			}
+			break
+		}
+		m.editing = nil
+		m.editingInThread = false
+		m.composer.SetText("", false)
+		m.threadComposer.SetText("", false)
+		m.composer.SetTitle("Message " + conversationTitle(msg.conversation))
+		m.threadComposer.SetTitle("Reply in thread")
+		if msg.thread != "" {
+			return m.loadThread(msg.conversation, msg.thread)
+		}
+		if msg.action == "Delete" && m.inspectorVisible {
+			m.closeInspector()
+		}
+		return m.loadHistory(msg.conversation)
 	case threadLoadedMsg:
 		if msg.conversation.ID != m.activeConversation {
 			break
@@ -361,10 +439,117 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		}
 		return tview.Batch(commands...)
 	case modal.DoneMsg:
+		if m.pendingAction != "" {
+			m.RemoveLayer("message-action")
+			action, reference := m.pendingAction, m.pendingMessage
+			m.pendingAction, m.pendingMessage = "", nil
+			if reference == nil || msg.ButtonIndex < 0 || msg.ButtonLabel == "Cancel" {
+				return nil
+			}
+			switch action {
+			case "delete":
+				if msg.ButtonLabel == "Delete" {
+					return m.deleteMessage(*reference)
+				}
+			case "react":
+				return m.setReaction(*reference, msg.ButtonLabel, true)
+			case "unreact":
+				return m.setReaction(*reference, msg.ButtonLabel, false)
+			}
+			return nil
+		}
 		m.RemoveLayer("profile")
 		return nil
 	}
 	return m.Layers.Update(msg)
+}
+
+func (m *Model) selectedMessage() (messageReference, bool) {
+	var node *tree.Node
+	if m.main.Focused() == 1 && m.right.Focused() == 0 {
+		node = m.messages.CurrentNode()
+	} else if m.inspectorVisible && m.main.Focused() == 2 && m.inspector.Focused() == 0 {
+		node = m.threadMessages.CurrentNode()
+	}
+	if node == nil {
+		return messageReference{}, false
+	}
+	reference, ok := node.Reference().(messageReference)
+	return reference, ok
+}
+
+func (m *Model) beginEdit(reference messageReference) {
+	m.editing = &reference
+	m.editingInThread = m.inspectorVisible && m.main.Focused() == 2
+	if m.editingInThread {
+		m.threadComposer.SetText(reference.message.Text, true)
+		m.threadComposer.SetTitle("Edit message — Enter to save")
+		m.inspector.SetFocus(1)
+		return
+	}
+	m.composer.SetText(reference.message.Text, true)
+	m.composer.SetTitle("Edit message — Enter to save")
+	m.right.SetFocus(1)
+}
+
+func (m *Model) cancelEdit() {
+	m.editing = nil
+	m.composer.SetText("", false)
+	m.threadComposer.SetText("", false)
+	if conversation, ok := m.conversations[m.activeConversation]; ok {
+		m.composer.SetTitle("Message " + conversationTitle(conversation))
+	}
+	m.threadComposer.SetTitle("Reply in thread")
+	m.editingInThread = false
+}
+
+func (m *Model) updateMessage(reference messageReference, text string) tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := m.client.UpdateMessage(ctx, reference.conversation.ID, reference.message.Timestamp, text)
+		return messageMutatedMsg{conversation: reference.conversation, thread: reference.contextThread, action: "Edit", err: err}
+	}
+}
+
+func (m *Model) deleteMessage(reference messageReference) tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err := m.client.DeleteMessage(ctx, reference.conversation.ID, reference.message.Timestamp)
+		thread := reference.contextThread
+		if reference.message.Timestamp == thread {
+			thread = ""
+		}
+		return messageMutatedMsg{conversation: reference.conversation, thread: thread, action: "Delete", err: err}
+	}
+}
+
+func (m *Model) setReaction(reference messageReference, name string, add bool) tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		var err error
+		if add {
+			err = m.client.AddReaction(ctx, reference.conversation.ID, reference.message.Timestamp, name)
+		} else {
+			err = m.client.RemoveReaction(ctx, reference.conversation.ID, reference.message.Timestamp, name)
+		}
+		return messageMutatedMsg{conversation: reference.conversation, thread: reference.contextThread, action: "Reaction", err: err}
+	}
+}
+
+func ownReactionNames(reactions []slack.Reaction, userID string) []string {
+	var names []string
+	for _, reaction := range reactions {
+		for _, id := range reaction.Users {
+			if id == userID {
+				names = append(names, reaction.Name)
+				break
+			}
+		}
+	}
+	return names
 }
 
 func (m *Model) connectRealtime() tview.Cmd {
@@ -428,6 +613,7 @@ func (m *Model) setMessageNotice(value string) {
 
 func (m *Model) showMessages(conversation slack.Conversation, messages []slack.Message, hasMore, thread bool) {
 	root := tree.NewNode("")
+	root.AddChild(tree.NewNode("Enter thread/profile · r react · - remove reaction · e edit · d delete").SetSelectable(false))
 	if thread {
 		root.AddChild(tree.NewNode("← Back to channel").SetReference(threadBackReference{conversation: conversation}))
 	}
@@ -446,12 +632,15 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 		if user, ok := m.users[message.User]; ok {
 			author = displayName(user)
 		}
-		text := strings.ReplaceAll(message.Text, "\n", " ↵ ")
+		text := strings.ReplaceAll(m.renderSlackText(message.Text), "\n", " ↵ ")
 		line := fmt.Sprintf("%s  %s  %s", author, formatTimestamp(message.Timestamp), text)
+		if message.Edited != nil {
+			line += "  (edited)"
+		}
 		if message.ReplyCount > 0 {
 			line += fmt.Sprintf("  [%d replies]", message.ReplyCount)
 		}
-		node := tree.NewNode(line).SetReference(messageReference{conversation: conversation, message: message})
+		node := tree.NewNode(line).SetReference(messageReference{conversation: conversation, message: message}).SetExpanded(true)
 		if message.User != "" {
 			node.AddChild(tree.NewNode("Profile: " + author).SetReference(profileReference{userID: message.User}))
 		}
@@ -461,6 +650,9 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 				name = file.Name
 			}
 			node.AddChild(tree.NewNode("📎 " + name).SetSelectable(false))
+		}
+		if len(message.Reactions) > 0 {
+			node.AddChild(tree.NewNode("Reactions: " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
 		}
 		root.AddChild(node)
 	}
@@ -478,6 +670,7 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 func (m *Model) showThread(conversation slack.Conversation, messages []slack.Message) {
 	root := tree.NewNode("")
 	root.AddChild(tree.NewNode("× Close thread").SetReference(threadBackReference{conversation: conversation}))
+	root.AddChild(tree.NewNode("r react · - remove reaction · e edit · d delete").SetSelectable(false))
 	for _, message := range messages {
 		author := message.Username
 		if user, ok := m.users[message.User]; ok {
@@ -489,14 +682,81 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 		if author == "" {
 			author = "Slack"
 		}
-		line := fmt.Sprintf("%s  %s  %s", author, formatTimestamp(message.Timestamp), strings.ReplaceAll(message.Text, "\n", " ↵ "))
-		node := tree.NewNode(line)
+		line := fmt.Sprintf("%s  %s  %s", author, formatTimestamp(message.Timestamp), strings.ReplaceAll(m.renderSlackText(message.Text), "\n", " ↵ "))
+		if message.Edited != nil {
+			line += "  (edited)"
+		}
+		node := tree.NewNode(line).SetReference(messageReference{conversation: conversation, message: message, contextThread: m.activeThread}).SetExpanded(true)
 		if message.User != "" {
 			node.AddChild(tree.NewNode("Profile: " + author).SetReference(profileReference{userID: message.User}))
+		}
+		if len(message.Reactions) > 0 {
+			node.AddChild(tree.NewNode("Reactions: " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
 		}
 		root.AddChild(node)
 	}
 	m.threadMessages.SetRoot(root).SetTopLevel(1).SetTitle("Thread in " + conversationTitle(conversation))
+}
+
+var slackEntityPattern = regexp.MustCompile(`<([@#!]?)([^>|]+)(?:\|([^>]+))?>`)
+var slackFormatPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\*([^*\n]+)\*`),
+	regexp.MustCompile(`_([^_\n]+)_`),
+	regexp.MustCompile(`~([^~\n]+)~`),
+	regexp.MustCompile("`([^`\\n]+)`"),
+}
+
+func (m *Model) renderSlackText(value string) string {
+	value = slackEntityPattern.ReplaceAllStringFunc(value, func(entity string) string {
+		parts := slackEntityPattern.FindStringSubmatch(entity)
+		kind, id, label := parts[1], parts[2], parts[3]
+		switch kind {
+		case "@":
+			if user, ok := m.users[id]; ok {
+				return "@" + displayName(user)
+			}
+			return "@" + id
+		case "#":
+			if conversation, ok := m.conversations[id]; ok && conversation.Name != "" {
+				return "#" + conversation.Name
+			}
+			if label != "" {
+				return "#" + label
+			}
+			return "#" + id
+		case "!":
+			if label != "" {
+				return "@" + label
+			}
+			return "@" + id
+		default:
+			if label != "" {
+				return label + " (" + id + ")"
+			}
+			return id
+		}
+	})
+	value = html.UnescapeString(value)
+	for _, pattern := range slackFormatPatterns {
+		value = pattern.ReplaceAllString(value, "$1")
+	}
+	return value
+}
+
+func renderReactions(reactions []slack.Reaction, selfUserID string) string {
+	parts := make([]string, 0, len(reactions))
+	for _, reaction := range reactions {
+		own := false
+		for _, id := range reaction.Users {
+			own = own || id == selfUserID
+		}
+		marker := ""
+		if own {
+			marker = "*"
+		}
+		parts = append(parts, fmt.Sprintf(":%s: %d%s", reaction.Name, reaction.Count, marker))
+	}
+	return strings.Join(parts, "  ")
 }
 
 func (m *Model) openInspector() {
