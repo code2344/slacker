@@ -1,10 +1,15 @@
 package root
 
 import (
+	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ayn2op/tview"
 	"github.com/ayn2op/tview/tree"
 	"github.com/code2344/slacker/internal/slack"
 )
@@ -54,6 +59,30 @@ func TestConversationTitleUsesDMDisplayName(t *testing.T) {
 	}
 }
 
+func TestConversationHeaderIncludesTopicAndMembers(t *testing.T) {
+	m := &Model{header: tview.NewTextView(), users: map[string]slack.User{}, conversations: map[string]slack.Conversation{}}
+	conversation := slack.Conversation{ID: "C1", Name: "lounge", NumMembers: 42}
+	conversation.Topic.Value = "Hang out and chat"
+	m.showConversationHeader(conversation)
+	if got := m.header.Text(); got != "#lounge\nHang out and chat  ·  42 members" {
+		t.Fatalf("header = %q", got)
+	}
+}
+
+func TestRenderImagePreviewProducesColoredTerminalCells(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	img.Set(0, 1, color.RGBA{B: 255, A: 255})
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := renderImagePreview(encoded.Bytes(), 2, 1)
+	if err != nil || len(preview) != 1 || len(preview[0]) != 3 || preview[0][1].Text != "▀" {
+		t.Fatalf("preview = %#v, err = %v", preview, err)
+	}
+}
+
 func TestAddDirectMessageAttachesAndDeduplicatesSidebarGroup(t *testing.T) {
 	user := slack.User{ID: "U123", Name: "ruben"}
 	user.Profile.DisplayName = "Ruben"
@@ -100,17 +129,20 @@ func TestMessagesUseProfileRowsAndExplicitThreadRows(t *testing.T) {
 	if len(children) != 4 {
 		t.Fatalf("top-level rows = %d, want 4", len(children))
 	}
-	if _, ok := children[1].Reference().(messageProfileReference); !ok {
-		t.Fatalf("first message reference = %T", children[1].Reference())
+	if _, ok := children[0].Reference().(messageProfileReference); !ok {
+		t.Fatalf("author reference = %T", children[0].Reference())
+	}
+	if _, ok := children[1].Reference().(messageReference); !ok {
+		t.Fatalf("message body reference = %T", children[1].Reference())
 	}
 	if _, ok := children[3].Reference().(messageReference); !ok {
 		t.Fatalf("compact message reference = %T", children[3].Reference())
 	}
-	if len(children[1].Children()) != 0 {
-		t.Fatalf("first message has %d nested rows", len(children[1].Children()))
-	}
 	if _, ok := children[2].Reference().(threadReference); !ok {
 		t.Fatalf("reply row reference = %T", children[2].Reference())
+	}
+	if m.messages.CurrentNode() != children[3] {
+		t.Fatal("message list did not select the newest message")
 	}
 	for _, child := range children {
 		for _, segment := range child.Line() {

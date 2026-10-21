@@ -54,15 +54,22 @@ func (c *Client) ClientBoot(ctx context.Context) (ClientBoot, error) {
 }
 
 type Conversation struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	IsChannel bool   `json:"is_channel"`
-	IsGroup   bool   `json:"is_group"`
-	IsIM      bool   `json:"is_im"`
-	IsMPIM    bool   `json:"is_mpim"`
-	IsPrivate bool   `json:"is_private"`
-	IsMember  bool   `json:"is_member"`
-	User      string `json:"user"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	IsChannel  bool   `json:"is_channel"`
+	IsGroup    bool   `json:"is_group"`
+	IsIM       bool   `json:"is_im"`
+	IsMPIM     bool   `json:"is_mpim"`
+	IsPrivate  bool   `json:"is_private"`
+	IsMember   bool   `json:"is_member"`
+	User       string `json:"user"`
+	NumMembers int    `json:"num_members"`
+	Topic      struct {
+		Value string `json:"value"`
+	} `json:"topic"`
+	Purpose struct {
+		Value string `json:"value"`
+	} `json:"purpose"`
 }
 
 type ChannelSection struct {
