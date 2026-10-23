@@ -28,6 +28,7 @@ import (
 	"github.com/code2344/slacker/internal/slack"
 	"github.com/code2344/slacker/internal/slackdesktop"
 	uiroot "github.com/code2344/slacker/internal/ui/root"
+	"github.com/code2344/slacker/internal/usercache"
 	"github.com/code2344/slacker/internal/workspace"
 	"github.com/gdamore/tcell/v3"
 	"github.com/mattn/go-shellwords"
@@ -779,7 +780,7 @@ func runTUI(cfg *config.Config) error {
 		return err
 	}
 	sections, _ := client.ListChannelSections(ctx)
-	users := map[string]slack.User{}
+	users := usercache.Load(meta.TeamID)
 	if boot, bootErr := client.UserBoot(ctx); bootErr == nil {
 		conversations = mergeConversations(conversations, boot.Channels, boot.IMs, boot.MPIMs)
 		for _, user := range boot.Members {
@@ -791,6 +792,7 @@ func runTUI(cfg *config.Config) error {
 	}
 	conversations = loadRecentDMActivity(ctx, client, conversations, meta.TeamID, 0)
 	loadRecentDMUsers(ctx, client, conversations, users, 64)
+	_ = usercache.Save(meta.TeamID, users)
 	profileFields, _ := client.TeamProfile(ctx)
 	counts, _ := client.ConversationCounts(ctx)
 	screen, err := tcell.NewScreen()
@@ -805,7 +807,9 @@ func runTUI(cfg *config.Config) error {
 	}
 	screen.EnablePaste()
 	tview.Styles = tview.Theme{}
-	return tview.NewApplication(uiroot.NewModel(cfg, meta.Name, auth.UserID, conversations, sections, users, profileFields, counts, client), tview.WithScreen(screen)).Run()
+	model := uiroot.NewModel(cfg, meta.Name, auth.UserID, conversations, sections, users, profileFields, counts, client)
+	model.SetUserCacheKey(meta.TeamID)
+	return tview.NewApplication(model, tview.WithScreen(screen)).Run()
 }
 
 type dmActivityCache struct {

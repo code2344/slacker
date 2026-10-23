@@ -10,7 +10,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Live message updates over RTM with reconnect backoff
 - [x] Channel history and channel message sending
 - [x] Thread history and thread replies
-- [x] DM display names and message author names
+- [x] DM display names and message author names with background resolution and persistent profile caching
 - [~] Unread and mention markers
 - [x] Slack-style right-hand thread pane
 - [~] Mark conversations read on open; persistent per-message read position remains planned
@@ -98,4 +98,4 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] CI and release packaging foundation
 - [ ] Homebrew, APT, RPM, AUR, Nix, Scoop, WinGet, and FreeBSD publication
 - [ ] Shell completion, man pages, update checking, and diagnostics bundle
-- [~] Local cache for images and DM activity; offline message history remains planned
+- [~] Local cache for images, DM activity, and resolved user profiles; offline message history remains planned

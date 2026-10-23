@@ -31,6 +31,7 @@ import (
 	"github.com/code2344/slacker/internal/config"
 	"github.com/code2344/slacker/internal/slack"
 	"github.com/code2344/slacker/internal/ui"
+	"github.com/code2344/slacker/internal/usercache"
 	"github.com/gdamore/tcell/v3"
 	"github.com/kyokomi/emoji/v2"
 )
@@ -75,6 +76,7 @@ type Model struct {
 	historyLoading     bool
 	drafts             map[string]string
 	threadDrafts       map[string]string
+	userCacheKey       string
 	searchMode         bool
 	selfUserID         string
 	editing            *messageReference
@@ -254,6 +256,10 @@ func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversation
 	}
 	m.build(workspaceName, conversations, sections)
 	return m
+}
+
+func (m *Model) SetUserCacheKey(key string) {
+	m.userCacheKey = key
 }
 
 func (m *Model) build(workspaceName string, conversations []slack.Conversation, sections []slack.ChannelSection) {
@@ -631,10 +637,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		for id, preview := range msg.previews {
 			m.imagePreviews[id] = preview
 		}
-		if userIDs := m.unresolvedUserIDs(msg.messages); len(userIDs) > 0 {
-			m.setMessageNotice("Resolving message authors…")
-			return m.loadAuthors(userIDs, &msg, nil)
-		}
+		userIDs := m.unresolvedUserIDs(msg.messages)
 		m.activeThread = ""
 		m.currentMessages = append(m.currentMessages[:0], msg.messages...)
 		m.currentHasMore = msg.hasMore
@@ -646,6 +649,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		commands := []tview.Cmd{uploadKittyPreviews(msg.previews)}
 		if len(msg.messages) > 0 {
 			commands = append(commands, m.markConversationRead(msg.conversation, msg.messages[0].Timestamp))
+		}
+		if len(userIDs) > 0 {
+			commands = append(commands, m.loadAuthors(userIDs, &msg, nil))
 		}
 		return tview.Batch(commands...)
 	case olderHistoryLoadedMsg:
@@ -744,14 +750,16 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		for id, preview := range msg.previews {
 			m.imagePreviews[id] = preview
 		}
-		if userIDs := m.unresolvedUserIDs(msg.messages); len(userIDs) > 0 {
-			return m.loadAuthors(userIDs, nil, &msg)
-		}
+		userIDs := m.unresolvedUserIDs(msg.messages)
 		m.activeThread = msg.timestamp
 		m.threadComposer.SetText(m.threadDrafts[draftKey(msg.conversation.ID, msg.timestamp)], true)
 		m.showThread(msg.conversation, msg.messages)
 		m.openInspector()
-		return uploadKittyPreviews(msg.previews)
+		commands := []tview.Cmd{uploadKittyPreviews(msg.previews)}
+		if len(userIDs) > 0 {
+			commands = append(commands, m.loadAuthors(userIDs, nil, &msg))
+		}
+		return tview.Batch(commands...)
 	case userLoadedMsg:
 		if msg.err != nil {
 			m.showProfileError(msg.userID, msg.err)
@@ -768,6 +776,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 				user.ID = id
 			}
 			m.users[id] = user
+		}
+		if m.userCacheKey != "" && len(msg.users) > 0 {
+			_ = usercache.Save(m.userCacheKey, m.users)
 		}
 		if msg.history != nil {
 			return m.Update(*msg.history)

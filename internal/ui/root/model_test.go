@@ -375,6 +375,22 @@ func TestOlderHistoryAppendsAndPreservesSelection(t *testing.T) {
 	}
 }
 
+func TestHistoryRendersBeforeBackgroundAuthorResolution(t *testing.T) {
+	conversation := slack.Conversation{ID: "C1", Name: "general", IsChannel: true}
+	m := NewModel(&config.Config{}, "Team", "U0", []slack.Conversation{conversation}, nil, map[string]slack.User{}, nil, nil, nil)
+	m.activeConversation = conversation.ID
+	cmd := m.Update(historyLoadedMsg{
+		conversation: conversation,
+		messages:     []slack.Message{{User: "U-missing", Text: "visible immediately", Timestamp: "200.1"}},
+	})
+	if cmd == nil {
+		t.Fatal("expected background author/read commands")
+	}
+	if len(m.currentMessages) != 1 || m.currentMessages[0].Text != "visible immediately" {
+		t.Fatalf("messages were blocked on author resolution: %#v", m.currentMessages)
+	}
+}
+
 func TestOwnReactionNamesAndRendering(t *testing.T) {
 	reactions := []slack.Reaction{{Name: "wave", Count: 2, Users: []string{"U1", "U2"}}, {Name: "eyes", Count: 1, Users: []string{"U2"}}}
 	if got := strings.Join(ownReactionNames(reactions, "U1"), ","); got != "wave" {
