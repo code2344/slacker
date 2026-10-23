@@ -443,6 +443,41 @@ func TestSearchAndAuthenticatedDownload(t *testing.T) {
 	}
 }
 
+func TestActivityFeedAndMessageHydration(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		switch r.URL.Path {
+		case "/api/activity.feed":
+			if !strings.Contains(r.Form.Get("types"), "message_reaction") || r.Form.Get("mode") != "chrono_v1" {
+				t.Errorf("activity form = %#v", r.Form)
+			}
+			io.WriteString(w, `{"ok":true,"items":[{"key":"mention-1","is_unread":true,"feed_ts":"1710000001.0","item":{"type":"at_user","message":{"channel":"C1","ts":"1710000000.1","author_user_id":"U2"}}},{"key":"reaction-1","item":{"type":"message_reaction","message":{"channel":"C1","ts":"1710000000.1"},"reaction":{"user":"U3","name":"heart"}}}],"response_metadata":{"next_cursor":"next"}}`)
+		case "/api/messages.list":
+			if !strings.Contains(r.Form.Get("message_ids"), `"channel":"C1"`) {
+				t.Errorf("message ids = %q", r.Form.Get("message_ids"))
+			}
+			io.WriteString(w, `{"ok":true,"messages_data":{"C1":{"messages":[{"ts":"1710000000.1","user":"U2","text":"hello <@U1>"}]}}}`)
+		default:
+			t.Errorf("path = %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	feed, err := client.ActivityFeed(context.Background(), 50, "", false)
+	if err != nil || len(feed.Items) != 2 || feed.Items[0].AuthorID != "U2" || feed.Items[1].Reaction != "heart" || feed.NextCursor != "next" {
+		t.Fatalf("feed = %#v, err = %v", feed, err)
+	}
+	bodies, err := client.ActivityMessages(context.Background(), map[string][]string{"C1": {"1710000000.1"}})
+	if err != nil || bodies[ActivityMessageKey("C1", "1710000000.1")].Text != "hello <@U1>" {
+		t.Fatalf("bodies = %#v, err = %v", bodies, err)
+	}
+}
+
 func TestConnectDoesNotAdoptEnterpriseNavigationURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/client.boot" {

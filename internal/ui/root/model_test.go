@@ -81,6 +81,22 @@ func TestEmojiMatchRankPrioritisesExactPrefixAndContains(t *testing.T) {
 	}
 }
 
+func TestActivityContextCoversMentionsThreadsReactionsAndDMs(t *testing.T) {
+	for _, test := range []struct {
+		item slack.ActivityItem
+		want string
+	}{
+		{item: slack.ActivityItem{Type: "at_user"}, want: "mentioned you in #general"},
+		{item: slack.ActivityItem{Type: "thread_v2"}, want: "replied in a thread in #general"},
+		{item: slack.ActivityItem{Type: "message_reaction", Reaction: "heart"}, want: "reacted ❤️ in #general"},
+		{item: slack.ActivityItem{Type: "dm"}, want: "sent a direct message"},
+	} {
+		if got := activityContext(test.item, "#general"); got != test.want {
+			t.Errorf("activityContext(%q) = %q, want %q", test.item.Type, got, test.want)
+		}
+	}
+}
+
 func TestReactionRowsOpenReactingUserDetails(t *testing.T) {
 	m := &Model{selfUserID: "U1", emojiPreviews: map[string]kittyPreview{}}
 	root := tree.NewNode("")

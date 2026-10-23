@@ -62,7 +62,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 ## Search and activity
 
 - [~] Message and file search; channel/people search and richer filters remain planned
-- [ ] Activity/mentions/reactions/invites view
+- [x] Activity view with mentions, thread replies, reactions, DMs, channel notifications, reminders, and direct navigation
 - [ ] Threads view, saved items, reminders, and later/to-do view
 - [ ] Search history and keyboard quick switcher
 

@@ -85,6 +85,11 @@ type Model struct {
 	userCacheKey       string
 	emojiCacheKey      string
 	workspaceEmoji     map[string]string
+	activityItems      []slack.ActivityItem
+	activityBodies     map[string]slack.ActivityMessage
+	activityView       bool
+	activityHydrated   bool
+	pendingMessageTS   string
 	searchMode         bool
 	selfUserID         string
 	editing            *messageReference
@@ -198,6 +203,7 @@ type openDMReference struct{ userID string }
 type sidebarViewReference string
 type fileReference struct{ file slack.File }
 type searchMessageReference struct{ match slack.MessageSearchMatch }
+type activityReference struct{ item slack.ActivityItem }
 type threadLoadedMsg struct {
 	conversation slack.Conversation
 	timestamp    string
@@ -227,6 +233,14 @@ type searchLoadedMsg struct {
 	files        []slack.File
 	fileTotal    int
 	err          error
+}
+type activityLoadedMsg struct {
+	feed slack.ActivityFeed
+	err  error
+}
+type activityBodiesLoadedMsg struct {
+	bodies map[string]slack.ActivityMessage
+	err    error
 }
 type fileOpenedMsg struct {
 	path string
@@ -288,6 +302,7 @@ func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversation
 		drafts:           make(map[string]string),
 		threadDrafts:     make(map[string]string),
 		workspaceEmoji:   make(map[string]string),
+		activityBodies:   make(map[string]slack.ActivityMessage),
 	}
 	for _, field := range profileFields {
 		m.profileFields[field.ID] = field
@@ -319,6 +334,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	m.directMessages = dms
 	m.apps = apps
 	root.AddChild(tree.NewNode(m.unreadLabel()).SetReference(sidebarViewReference("unreads")))
+	root.AddChild(tree.NewNode("🔔  Activity").SetReference(sidebarViewReference("activity")))
 	root.AddChild(tree.NewNode("💬  DMs").SetReference(sidebarViewReference("dms")))
 	root.AddChild(dms)
 	sectionNodes := map[string]*tree.Node{}
@@ -620,6 +636,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			case "unreads":
 				m.refreshUnreadSidebar()
 				m.sidebar.SetRoot(m.unreadSidebarRoot).SetTitle("Unreads")
+			case "activity":
+				m.openActivity()
+				return m.loadActivity()
 			case "dms":
 				m.sidebar.SetRoot(m.dmSidebarRoot).SetTitle("Direct messages")
 			case "home":
@@ -657,6 +676,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.messages.SetTitle("Opening " + fileName(reference.file) + "…")
 			return m.downloadAndOpen(reference.file)
 		case searchMessageReference:
+			m.activityView = false
 			conversation := reference.match.Channel
 			if known, ok := m.conversations[conversation.ID]; ok {
 				conversation = known
@@ -666,6 +686,8 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.closeInspector()
 			m.setMessageNotice("Loading " + m.conversationTitle(conversation) + "…")
 			return m.loadHistory(conversation)
+		case activityReference:
+			return m.openActivityItem(reference.item)
 		}
 	case dmOpenedMsg:
 		if msg.err != nil {
@@ -701,6 +723,8 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.historyCursor = msg.cursor
 		m.historyLoading = false
 		m.showMessages(msg.conversation, msg.messages, msg.hasMore, false)
+		m.selectMessageTimestamp(m.pendingMessageTS)
+		m.pendingMessageTS = ""
 		m.composer.SetDisabled(false)
 		m.composer.SetTitle("Message " + m.conversationTitle(msg.conversation))
 		commands := []tview.Cmd{m.uploadKittyPreviews(msg.previews)}
@@ -852,6 +876,38 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		if msg.thread != nil {
 			return m.Update(*msg.thread)
 		}
+		if m.activityView {
+			m.showActivity()
+		}
+	case activityLoadedMsg:
+		if msg.err != nil {
+			m.messages.SetTitle("Activity failed")
+			m.messages.SetRoot(tree.NewNode("").AddChild(tree.NewNode(msg.err.Error()).SetSelectable(false))).SetTopLevel(1)
+			break
+		}
+		m.activityItems = msg.feed.Items
+		m.activityHydrated = false
+		m.showActivity()
+		refs := make(map[string][]string)
+		for _, item := range msg.feed.Items {
+			if item.ChannelID != "" && item.Timestamp != "" {
+				refs[item.ChannelID] = append(refs[item.ChannelID], item.Timestamp)
+			}
+		}
+		commands := []tview.Cmd{m.loadActivityBodies(refs)}
+		if userIDs := m.unresolvedActivityUserIDs(); len(userIDs) > 0 {
+			commands = append(commands, m.loadAuthors(userIDs, nil, nil))
+		}
+		return tview.Batch(commands...)
+	case activityBodiesLoadedMsg:
+		m.activityHydrated = true
+		if msg.err == nil {
+			m.activityBodies = msg.bodies
+		}
+		m.showActivity()
+		if userIDs := m.unresolvedActivityUserIDs(); len(userIDs) > 0 {
+			return m.loadAuthors(userIDs, nil, nil)
+		}
 	case workspaceEmojiLoadedMsg:
 		if msg.err == nil && msg.emojis != nil {
 			m.workspaceEmoji = msg.emojis
@@ -932,7 +988,11 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.refreshUnreadSidebar()
 			m.refreshSidebarLabels()
 		}
-		if conversationID == m.activeConversation && (msg.event.Type == "message" || msg.event.Type == "reaction_added" || msg.event.Type == "reaction_removed") {
+		activityChanged := msg.event.Type == "message" || msg.event.Type == "reaction_added" || msg.event.Type == "reaction_removed"
+		if m.activityView && activityChanged {
+			commands = append(commands, m.loadActivity())
+		}
+		if !m.activityView && conversationID == m.activeConversation && activityChanged {
 			if m.activeThread != "" {
 				commands = append(commands, m.loadThread(m.conversations[m.activeConversation], m.activeThread))
 			} else {
@@ -2110,6 +2170,144 @@ func (m *Model) search(query string) tview.Cmd {
 	}
 }
 
+func (m *Model) openActivity() {
+	m.saveActiveDraft()
+	m.closeInspector()
+	m.activityView = true
+	m.header.SetText("Activity\nMentions, thread replies, reactions, and direct messages").SetScrollable(false).SetWrap(false)
+	m.messages.SetRoot(tree.NewNode("").AddChild(tree.NewNode("Loading activity…").SetSelectable(false))).SetTopLevel(1).SetTitle("Activity")
+	m.composer.SetText("", false)
+	m.composer.SetDisabled(true)
+	m.composer.SetTitle("Activity")
+	m.right.SetFocus(rightMessagesIndex)
+}
+
+func (m *Model) loadActivity() tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		feed, err := m.client.ActivityFeed(ctx, 50, "", false)
+		return activityLoadedMsg{feed: feed, err: err}
+	}
+}
+
+func (m *Model) loadActivityBodies(refs map[string][]string) tview.Cmd {
+	if len(refs) == 0 {
+		return nil
+	}
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		bodies, err := m.client.ActivityMessages(ctx, refs)
+		return activityBodiesLoadedMsg{bodies: bodies, err: err}
+	}
+}
+
+func (m *Model) showActivity() {
+	selectedKey := ""
+	if m.messages != nil && m.messages.CurrentNode() != nil {
+		if selected, ok := m.messages.CurrentNode().Reference().(activityReference); ok {
+			selectedKey = selected.item.Key
+		}
+	}
+	root := tree.NewNode("")
+	var selectedNode *tree.Node
+	if len(m.activityItems) == 0 {
+		root.AddChild(tree.NewNode("No recent activity").SetSelectable(false))
+	}
+	for _, item := range m.activityItems {
+		body := m.activityBodies[slack.ActivityMessageKey(item.ChannelID, item.Timestamp)]
+		authorID := item.AuthorID
+		if authorID == "" {
+			authorID = body.UserID
+		}
+		author := authorID
+		if user, ok := m.users[authorID]; ok {
+			author = displayName(user)
+		}
+		if author == "" {
+			author = "Slack"
+		}
+		conversation := m.conversations[item.ChannelID]
+		where := m.conversationTitle(conversation)
+		if where == "" {
+			where = item.ChannelID
+		}
+		contextLabel := activityContext(item, where)
+		when := item.FeedTS
+		if when == "" {
+			when = item.Timestamp
+		}
+		marker := "  "
+		if item.IsUnread {
+			marker = "● "
+		}
+		node := tree.NewNode(fmt.Sprintf("%s@%s  %s  %s", marker, author, contextLabel, formatRelativeTimestamp(when, time.Now()))).SetReference(activityReference{item: item})
+		root.AddChild(node)
+		if item.Key == selectedKey {
+			selectedNode = node
+		}
+		preview := strings.TrimSpace(m.renderSlackText(body.Text))
+		if preview == "" {
+			if m.activityHydrated {
+				preview = "Message preview unavailable"
+			} else {
+				preview = "Loading message preview…"
+			}
+		}
+		root.AddChild(tree.NewNode("    " + strings.ReplaceAll(preview, "\n", " ↵ ")).SetSelectable(false))
+		root.AddChild(tree.NewNode("").SetSelectable(false))
+	}
+	m.messages.SetRoot(root).SetTopLevel(1).SetTitle("Activity")
+	if selectedNode != nil {
+		m.messages.SetCurrentNode(selectedNode)
+	} else if children := root.Children(); len(children) > 0 && children[0].Reference() != nil {
+		m.messages.SetCurrentNode(children[0])
+	}
+}
+
+func activityContext(item slack.ActivityItem, where string) string {
+	switch item.Type {
+	case "at_user", "at_user_group", "at_channel", "at_everyone", "keyword", "list_user_mentioned", "unjoined_channel_mention":
+		return "mentioned you in " + where
+	case "thread_v2":
+		return "replied in a thread in " + where
+	case "message_reaction":
+		return "reacted " + renderEmojiAliases(":"+item.Reaction+":") + " in " + where
+	case "dm", "bot_dm_bundle":
+		return "sent a direct message"
+	case "saved_reminder":
+		return "reminder in " + where
+	default:
+		return "activity in " + where
+	}
+}
+
+func (m *Model) unresolvedActivityUserIDs() []string {
+	messages := make([]slack.Message, 0, len(m.activityItems)*2)
+	for _, item := range m.activityItems {
+		messages = append(messages, slack.Message{User: item.AuthorID})
+		if body, ok := m.activityBodies[slack.ActivityMessageKey(item.ChannelID, item.Timestamp)]; ok {
+			messages = append(messages, slack.Message{User: body.UserID})
+		}
+	}
+	return m.unresolvedUserIDs(messages)
+}
+
+func (m *Model) openActivityItem(item slack.ActivityItem) tview.Cmd {
+	conversation, ok := m.conversations[item.ChannelID]
+	if !ok {
+		m.messages.SetTitle("Activity · conversation unavailable")
+		return nil
+	}
+	if item.ThreadTS != "" {
+		m.activeConversation = conversation.ID
+		return m.loadThread(conversation, item.ThreadTS)
+	}
+	m.pendingMessageTS = item.Timestamp
+	return m.openConversation(conversation.ID)
+}
+
 func (m *Model) showSearchResults(result searchLoadedMsg) {
 	root := tree.NewNode("")
 	root.AddChild(tree.NewNode(fmt.Sprintf("Messages  %d matches", result.messageTotal)).SetSelectable(false))
@@ -2671,7 +2869,7 @@ func draftKey(conversationID, threadTimestamp string) string {
 }
 
 func (m *Model) saveActiveDraft() {
-	if m.activeConversation != "" && !m.searchMode && m.editing == nil {
+	if m.activeConversation != "" && !m.activityView && !m.searchMode && m.editing == nil {
 		m.drafts[m.activeConversation] = m.composer.Text()
 	}
 	if m.activeConversation != "" && m.activeThread != "" && m.inspectorKind == "thread" && m.editing == nil {
@@ -2815,6 +3013,7 @@ func (m *Model) openConversation(conversationID string) tview.Cmd {
 		return nil
 	}
 	m.saveActiveDraft()
+	m.activityView = false
 	m.closeInspector()
 	m.activeConversation, m.activeThread = conversationID, ""
 	m.restoreConversationDraft(conversationID)
