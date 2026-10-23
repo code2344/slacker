@@ -9,10 +9,14 @@ require (
 	github.com/browserutils/kooky v0.2.10
 	github.com/gdamore/tcell/v3 v3.5.0
 	github.com/godbus/dbus/v5 v5.2.2
+	github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db
+	github.com/kyokomi/emoji/v2 v2.2.14
 	github.com/mattn/go-shellwords v1.0.15
+	github.com/rivo/uniseg v0.4.7
 	github.com/syndtr/goleveldb v1.0.0
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/crypto v0.57.0
+	golang.org/x/net v0.59.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
 	modernc.org/sqlite v1.59.0
@@ -27,20 +31,16 @@ require (
 	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gdamore/encoding v1.0.1 // indirect
-	github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db // indirect
 	github.com/gonuts/binary v0.2.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/keybase/go-keychain v0.0.1 // indirect
-	github.com/kyokomi/emoji/v2 v2.2.14 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sahilm/fuzzy v0.1.3 // indirect
-	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/tools v0.50.0 // indirect
 	gopkg.in/ini.v1 v1.67.1 // indirect

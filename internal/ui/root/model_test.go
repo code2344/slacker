@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ayn2op/tview"
+	styledtext "github.com/ayn2op/tview/text"
 	"github.com/ayn2op/tview/tree"
 	"github.com/code2344/slacker/internal/config"
 	"github.com/code2344/slacker/internal/slack"
@@ -619,6 +620,38 @@ func TestFormatRelativeTimestamp(t *testing.T) {
 	now := time.Unix(1710000180, 0).Local()
 	if got := formatRelativeTimestamp("1710000000.0", now); got != "3 minutes ago" {
 		t.Fatalf("relative timestamp = %q", got)
+	}
+}
+
+func TestWrapStyledLinePreservesStylesAndIndentsContinuations(t *testing.T) {
+	bold := tcell.StyleDefault.Bold(true)
+	line := []styledtext.Segment{
+		styledtext.NewSegment("  ", tcell.StyleDefault),
+		styledtext.NewSegment("hello ", bold),
+		styledtext.NewSegment("世界 again", tcell.StyleDefault),
+	}
+	wrapped := wrapStyledLine(line, 10, 2)
+	if len(wrapped) < 2 {
+		t.Fatalf("expected wrapped lines, got %#v", wrapped)
+	}
+	for index, got := range wrapped {
+		if got.Width() > 10 {
+			t.Fatalf("line %d width = %d, want <= 10", index, got.Width())
+		}
+		if index > 0 && (len(got) == 0 || !strings.HasPrefix(got[0].Text, "  ")) {
+			t.Fatalf("continuation line %d lacks indent: %#v", index, got)
+		}
+	}
+	foundBold := false
+	for _, got := range wrapped {
+		for _, segment := range got {
+			if segment.Style == bold && strings.Contains(segment.Text, "hello") {
+				foundBold = true
+			}
+		}
+	}
+	if !foundBold {
+		t.Fatal("bold segment style was not preserved")
 	}
 }
 

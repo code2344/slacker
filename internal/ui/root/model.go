@@ -38,6 +38,7 @@ import (
 	"github.com/code2344/slacker/internal/usercache"
 	"github.com/gdamore/tcell/v3"
 	"github.com/kyokomi/emoji/v2"
+	"github.com/rivo/uniseg"
 )
 
 // Model is the first Slack-backed shell of the three-pane interface.
@@ -1232,12 +1233,10 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 				root.AddChild(node)
 			}
 		} else if compact {
-			latestNode = tree.NewNode("").SetLine(m.renderMessageLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
-			root.AddChild(latestNode)
+			latestNode = addWrappedTreeRows(root, m.renderMessageLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil), messageTreeWidth(m.messages), 18, reference)
 		} else {
 			root.AddChild(tree.NewNode(fmt.Sprintf("@%s  %s", author, when)).SetReference(messageProfileReference{messageReference: reference}))
-			latestNode = tree.NewNode("").SetLine(m.renderMessageLine("  ", text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
-			root.AddChild(latestNode)
+			latestNode = addWrappedTreeRows(root, m.renderMessageLine("  ", text, message.Edited != nil), messageTreeWidth(m.messages), 2, reference)
 		}
 		for _, file := range message.Files {
 			name := file.Title
@@ -1324,12 +1323,10 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 				root.AddChild(node)
 			}
 		} else if compact {
-			latestNode = tree.NewNode("").SetLine(m.renderMessageLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
-			root.AddChild(latestNode)
+			latestNode = addWrappedTreeRows(root, m.renderMessageLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil), messageTreeWidth(m.threadMessages), 18, reference)
 		} else {
 			root.AddChild(tree.NewNode(fmt.Sprintf("@%s  %s", author, when)).SetReference(messageProfileReference{messageReference: reference}))
-			latestNode = tree.NewNode("").SetLine(m.renderMessageLine("  ", text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
-			root.AddChild(latestNode)
+			latestNode = addWrappedTreeRows(root, m.renderMessageLine("  ", text, message.Edited != nil), messageTreeWidth(m.threadMessages), 2, reference)
 		}
 		for _, file := range message.Files {
 			kind := "file"
@@ -1473,6 +1470,79 @@ func (m *Model) renderMessageLine(prefix, value string, edited bool) styledtext.
 		line = append(line, styledtext.NewSegment("  (edited)", tcell.StyleDefault.Italic(true)))
 	}
 	return line
+}
+
+func messageTreeWidth(model *tree.Model) int {
+	_, _, width, _ := model.InnerRect()
+	if width < 24 {
+		return 80
+	}
+	return width - 2
+}
+
+func addWrappedTreeRows(root *tree.Node, line styledtext.Line, width, continuationIndent int, reference any) *tree.Node {
+	lines := wrapStyledLine(line, width, continuationIndent)
+	var first *tree.Node
+	for index, wrapped := range lines {
+		node := tree.NewNode("").SetLine(wrapped)
+		if index == 0 {
+			node.SetReference(reference).SetExpanded(true)
+			first = node
+		} else {
+			node.SetSelectable(false)
+		}
+		root.AddChild(node)
+	}
+	return first
+}
+
+func wrapStyledLine(line styledtext.Line, width, continuationIndent int) []styledtext.Line {
+	width = max(width, continuationIndent+8)
+	indent := strings.Repeat(" ", continuationIndent)
+	result := []styledtext.Line{}
+	current := styledtext.Line{}
+	currentWidth := 0
+	appendText := func(text string, style tcell.Style) {
+		if text == "" {
+			return
+		}
+		if len(current) > 0 && current[len(current)-1].Style == style {
+			current[len(current)-1].Text += text
+		} else {
+			current = append(current, styledtext.NewSegment(text, style))
+		}
+		currentWidth += uniseg.StringWidth(text)
+	}
+	newLine := func() {
+		result = append(result, current)
+		current = styledtext.Line{}
+		currentWidth = 0
+		if continuationIndent > 0 {
+			appendText(indent, tcell.StyleDefault)
+		}
+	}
+	for _, segment := range line {
+		graphemes := uniseg.NewGraphemes(segment.Text)
+		for graphemes.Next() {
+			value := graphemes.Str()
+			cellWidth := uniseg.StringWidth(value)
+			if value == "\n" {
+				newLine()
+				continue
+			}
+			if currentWidth+cellWidth > width && currentWidth > continuationIndent {
+				newLine()
+				if strings.TrimSpace(value) == "" {
+					continue
+				}
+			}
+			appendText(value, segment.Style)
+		}
+	}
+	if len(current) > 0 || len(result) == 0 {
+		result = append(result, current)
+	}
+	return result
 }
 
 func renderEmojiAliases(value string) string {
@@ -2255,7 +2325,9 @@ func (m *Model) showActivity() {
 				preview = "Loading message preview…"
 			}
 		}
-		root.AddChild(tree.NewNode("    " + strings.ReplaceAll(preview, "\n", " ↵ ")).SetSelectable(false))
+		for _, line := range wrapStyledLine(styledtext.Line{styledtext.NewSegment("    "+preview, tcell.StyleDefault)}, messageTreeWidth(m.messages), 4) {
+			root.AddChild(tree.NewNode("").SetLine(line).SetSelectable(false))
+		}
 		root.AddChild(tree.NewNode("").SetSelectable(false))
 	}
 	m.messages.SetRoot(root).SetTopLevel(1).SetTitle("Activity")
@@ -2323,8 +2395,8 @@ func (m *Model) showSearchResults(result searchLoadedMsg) {
 		if channel == "" {
 			channel = match.Channel.ID
 		}
-		line := fmt.Sprintf("#%s  @%s  %s  %s", channel, author, formatRelativeTimestamp(match.Timestamp, time.Now()), strings.ReplaceAll(m.renderSlackText(match.Text), "\n", " ↵ "))
-		root.AddChild(tree.NewNode(line).SetReference(searchMessageReference{match: match}))
+		prefix := fmt.Sprintf("#%s  @%s  %s  ", channel, author, formatRelativeTimestamp(match.Timestamp, time.Now()))
+		addWrappedTreeRows(root, styledtext.Line{styledtext.NewSegment(prefix+m.renderSlackText(match.Text), tcell.StyleDefault)}, messageTreeWidth(m.messages), uniseg.StringWidth(prefix), searchMessageReference{match: match})
 	}
 	root.AddChild(tree.NewNode("").SetSelectable(false))
 	root.AddChild(tree.NewNode(fmt.Sprintf("Files  %d matches", result.fileTotal)).SetSelectable(false))
