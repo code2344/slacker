@@ -27,6 +27,7 @@ type Client struct {
 	session Session
 	http    *http.Client
 	retries int
+	teamID  string
 }
 
 type APIError struct {
@@ -105,11 +106,13 @@ func (c *Client) Connect(ctx context.Context) (Auth, error) {
 	if err != nil {
 		return Auth{}, err
 	}
-	return Auth{
+	auth := Auth{
 		OK: true, Team: boot.Team.Name, TeamID: boot.Team.ID,
 		User: boot.Self.Name, UserID: boot.Self.ID,
 		URL: boot.Team.URL,
-	}, nil
+	}
+	c.teamID = auth.TeamID
+	return auth, nil
 }
 
 func (c *Client) Call(ctx context.Context, method string, params url.Values, out any) error {
@@ -152,6 +155,7 @@ func (c *Client) callOnce(ctx context.Context, method string, params url.Values,
 		return err, 0
 	}
 	endpoint := base.ResolveReference(&url.URL{Path: method})
+	decorateSlackRoute(endpoint, c.teamID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), strings.NewReader(params.Encode()))
 	if err != nil {
 		return err, 0
@@ -194,6 +198,17 @@ func (c *Client) callOnce(ctx context.Context, method string, params url.Values,
 		}
 	}
 	return nil, 0
+}
+
+func decorateSlackRoute(endpoint *url.URL, teamID string) {
+	if endpoint == nil || teamID == "" || !isSlackHost(endpoint.Hostname()) {
+		return
+	}
+	query := endpoint.Query()
+	if query.Get("slack_route") == "" {
+		query.Set("slack_route", teamID)
+	}
+	endpoint.RawQuery = query.Encode()
 }
 
 func cloneValues(values url.Values) url.Values {

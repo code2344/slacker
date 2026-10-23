@@ -72,6 +72,24 @@ func TestCallReturnsAPIError(t *testing.T) {
 	}
 }
 
+func TestDecorateSlackRouteAddsPostBootWorkspaceContext(t *testing.T) {
+	endpoint, err := url.Parse("https://slack.com/api/activity.feed?existing=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decorateSlackRoute(endpoint, "T0266FRGM")
+	if got := endpoint.Query().Get("slack_route"); got != "T0266FRGM" {
+		t.Fatalf("slack_route = %q", got)
+	}
+	if got := endpoint.Query().Get("existing"); got != "true" {
+		t.Fatalf("existing query = %q", got)
+	}
+	decorateSlackRoute(endpoint, "T-OTHER")
+	if got := endpoint.Query().Get("slack_route"); got != "T0266FRGM" {
+		t.Fatalf("caller route was overwritten: %q", got)
+	}
+}
+
 func TestEmojiList(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/emoji.list" {
