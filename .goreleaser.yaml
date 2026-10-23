@@ -31,7 +31,7 @@ nfpms:
     maintainer: code2344
     description: Keyboard-driven Slack terminal client
     license: GPL-3.0
-    formats: [deb, rpm, apk]
+    formats: [deb, rpm, apk, archlinux]
     bindir: /usr/bin
 checksum:
   name_template: checksums.txt
