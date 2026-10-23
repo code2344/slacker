@@ -14,7 +14,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Live unread and mention markers
 - [x] Slack-style right-hand thread pane
 - [x] Mark conversations read on open and update every sidebar view
-- [~] Unread-only view with mention-first ordering; next-unread keyboard navigation remains planned
+- [x] Unread-only view with mention-first ordering and `u` next-unread navigation
 - [ ] Browse/search/join/leave/create/archive channels
 - [~] Start one-to-one DMs from profiles; group DM creation remains planned
 - [ ] Channel topics, purposes, bookmarks, tabs, and member lists
@@ -35,7 +35,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 
 ## Reactions and emoji
 
-- [x] Display reaction names, counts, and whether you reacted
+- [x] Display reaction names, counts, whether you reacted, and enlarged custom reaction artwork
 - [x] Add common reactions and remove your own reactions
 - [ ] Full emoji picker and reacting-user list
 - [~] Standard Unicode emoji and workspace aliases render inline; custom workspace emoji render on demand through Kitty graphics, GIF emoji animate, and emoji-only custom messages use jumbo rendering; skin tones and a picker remain planned

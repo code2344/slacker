@@ -405,7 +405,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	m.composer.SetDisabled(true)
 	m.composer.SetTitle("Composer")
 	ui.ConfigureBox(m.composer.Box, &m.cfg.Theme)
-	m.controls.SetText("  Enter send   Shift+Enter newline   Tab complete   ↑ older at top   t thread   r react   e edit   d delete   / search").SetScrollable(false).SetWrap(false)
+	m.controls.SetText("  Enter send   Shift+Enter newline   Tab complete   u next unread   ↑ older   t thread   r react   e edit   d delete   / search").SetScrollable(false).SetWrap(false)
 
 	m.right.SetDirection(flex.DirectionRow).
 		AddItem(m.header, 2, 0, false).
@@ -490,6 +490,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 					return nil
 				}
 			}
+		}
+		if msg.Str() == "u" && m.focusedComposer() == nil {
+			return m.openNextUnread()
 		}
 		if (msg.Key() == tcell.KeyUp || msg.Key() == tcell.KeyPgUp) && m.main.Focused() == mainMessagesIndex && m.right.Focused() == rightMessagesIndex && m.currentHasMore && !m.historyLoading && m.atOldestMessage() {
 			m.historyLoading = true
@@ -579,19 +582,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			}
 			return nil
 		case string:
-			if reference == "" || m.client == nil {
-				break
-			}
-			m.saveActiveDraft()
-			m.closeInspector()
-			conversation := m.conversations[reference]
-			m.activeConversation, m.activeThread = reference, ""
-			m.restoreConversationDraft(reference)
-			m.showConversationHeader(conversation)
-			m.messages.SetTitle("Messages")
-			m.setMessageNotice("Loading messages…")
-			m.composer.SetDisabled(true)
-			return m.loadHistory(conversation)
+			return m.openConversation(reference)
 		case messageProfileReference:
 			return m.showProfile(reference.message.User)
 		case openDMReference:
@@ -1141,7 +1132,7 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 			}
 		}
 		if len(message.Reactions) > 0 {
-			root.AddChild(tree.NewNode("").SetLine(m.renderMessageLine("  ", m.renderReactions(message.Reactions, m.selfUserID), false)).SetSelectable(false))
+			m.addReactionRows(root, message.Reactions)
 		}
 		if message.ReplyCount > 0 {
 			label := "reply"
@@ -1229,7 +1220,7 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 			}
 		}
 		if len(message.Reactions) > 0 {
-			root.AddChild(tree.NewNode("").SetLine(m.renderMessageLine("  ", m.renderReactions(message.Reactions, m.selfUserID), false)).SetSelectable(false))
+			m.addReactionRows(root, message.Reactions)
 		}
 		previousAuthor, previousTime = authorKey, messageTime
 	}
@@ -1462,6 +1453,63 @@ func (m *Model) renderReactions(reactions []slack.Reaction, selfUserID string) s
 		parts = append(parts, fmt.Sprintf("%s %d%s", m.renderEmojiAliases(":"+reaction.Name+":"), reaction.Count, marker))
 	}
 	return strings.Join(parts, "  ")
+}
+
+func (m *Model) addReactionRows(root *tree.Node, reactions []slack.Reaction) {
+	lines := m.reactionLines(reactions)
+	if len(lines) == 0 {
+		root.AddChild(tree.NewNode("").SetLine(m.renderMessageLine("  ", m.renderReactions(reactions, m.selfUserID), false)).SetSelectable(false))
+		return
+	}
+	for _, line := range lines {
+		root.AddChild(tree.NewNode("").SetLine(line).SetSelectable(false))
+	}
+}
+
+func (m *Model) reactionLines(reactions []slack.Reaction) []styledtext.Line {
+	hasCustom := false
+	for _, reaction := range reactions {
+		_, hasCustom = m.emojiPreviews[reaction.Name+"\x00reaction"]
+		if hasCustom {
+			break
+		}
+	}
+	if !hasCustom {
+		return nil
+	}
+	lines := []styledtext.Line{
+		{styledtext.NewSegment("  ", tcell.StyleDefault)},
+		{styledtext.NewSegment("  ", tcell.StyleDefault)},
+	}
+	for _, reaction := range reactions {
+		own := slices.Contains(reaction.Users, m.selfUserID)
+		marker := ""
+		if own {
+			marker = "*"
+		}
+		if preview, ok := m.emojiPreviews[reaction.Name+"\x00reaction"]; ok {
+			red := int32((preview.imageID >> 16) & 0xff)
+			green := int32((preview.imageID >> 8) & 0xff)
+			blue := int32(preview.imageID & 0xff)
+			style := tcell.StyleDefault.Foreground(tcell.NewRGBColor(red, green, blue))
+			for row := range 2 {
+				for column := range 2 {
+					cell := string([]rune{0x10EEEE, kittyDiacritics[row], kittyDiacritics[column]})
+					lines[row] = append(lines[row], styledtext.NewSegment(cell, style))
+				}
+				if row == 0 {
+					lines[row] = append(lines[row], styledtext.NewSegment(fmt.Sprintf(" %d%s  ", reaction.Count, marker), tcell.StyleDefault))
+				} else {
+					lines[row] = append(lines[row], styledtext.NewSegment("     ", tcell.StyleDefault))
+				}
+			}
+			continue
+		}
+		label := fmt.Sprintf("%s %d%s  ", renderEmojiAliases(":"+reaction.Name+":"), reaction.Count, marker)
+		lines[0] = append(lines[0], styledtext.NewSegment(label, tcell.StyleDefault))
+		lines[1] = append(lines[1], styledtext.NewSegment(strings.Repeat(" ", len([]rune(label))), tcell.StyleDefault))
+	}
+	return lines
 }
 
 func (m *Model) showProfile(userID string) tview.Cmd {
@@ -1711,7 +1759,10 @@ func (m *Model) loadWorkspaceEmojiPreviews(messages []slack.Message) tview.Cmd {
 		}
 	}
 	for name := range targets {
-		if _, ok := m.emojiPreviews[name]; ok {
+		_, inlineOK := m.emojiPreviews[name]
+		_, jumboOK := m.emojiPreviews[name+"\x00jumbo"]
+		_, reactionOK := m.emojiPreviews[name+"\x00reaction"]
+		if inlineOK && jumboOK && reactionOK {
 			delete(targets, name)
 		}
 	}
@@ -1767,8 +1818,15 @@ func (m *Model) loadWorkspaceEmojiPreviews(messages []slack.Message) tview.Cmd {
 			if jumbo.imageID == 0 {
 				jumbo.imageID = 1
 			}
-			jumbo.columns, jumbo.rows = 4, 3
+			jumbo.columns, jumbo.rows = 6, 4
 			previews[name+"\x00jumbo"] = jumbo
+			reaction := preview
+			reaction.imageID = (imageID ^ 0x400000) & 0xFFFFFF
+			if reaction.imageID == 0 {
+				reaction.imageID = 1
+			}
+			reaction.columns, reaction.rows = 2, 2
+			previews[name+"\x00reaction"] = reaction
 		}
 		return workspaceEmojiPreviewsLoadedMsg{previews: previews}
 	}
@@ -2029,7 +2087,8 @@ func (m *Model) jumboEmojiLines(value, prefix string) []styledtext.Line {
 		}
 		previews = append(previews, preview)
 	}
-	lines := make([]styledtext.Line, 3)
+	rows := previews[0].rows
+	lines := make([]styledtext.Line, rows)
 	for row := range lines {
 		if row == 0 {
 			lines[row] = styledtext.Line{styledtext.NewSegment(prefix, tcell.StyleDefault)}
@@ -2041,7 +2100,7 @@ func (m *Model) jumboEmojiLines(value, prefix string) []styledtext.Line {
 			green := int32((preview.imageID >> 8) & 0xff)
 			blue := int32(preview.imageID & 0xff)
 			style := tcell.StyleDefault.Foreground(tcell.NewRGBColor(red, green, blue))
-			for column := range 4 {
+			for column := range preview.columns {
 				cell := string([]rune{0x10EEEE, kittyDiacritics[row], kittyDiacritics[column]})
 				lines[row] = append(lines[row], styledtext.NewSegment(cell, style))
 			}
@@ -2515,6 +2574,52 @@ func (m *Model) unreadLabel() string {
 		return fmt.Sprintf("●  Unreads (%d)", unread)
 	}
 	return "○  Unreads"
+}
+
+func (m *Model) openConversation(conversationID string) tview.Cmd {
+	conversation, ok := m.conversations[conversationID]
+	if conversationID == "" || !ok || m.client == nil {
+		return nil
+	}
+	m.saveActiveDraft()
+	m.closeInspector()
+	m.activeConversation, m.activeThread = conversationID, ""
+	m.restoreConversationDraft(conversationID)
+	m.showConversationHeader(conversation)
+	m.messages.SetTitle("Messages")
+	m.setMessageNotice("Loading messages…")
+	m.composer.SetDisabled(true)
+	return m.loadHistory(conversation)
+}
+
+func (m *Model) openNextUnread() tview.Cmd {
+	var unread []string
+	for id, count := range m.counts {
+		if _, ok := m.conversations[id]; !ok {
+			continue
+		}
+		if count.UnreadCount > 0 || count.MentionCount > 0 || (count.Latest != "" && count.Latest > count.LastRead) {
+			unread = append(unread, id)
+		}
+	}
+	if len(unread) == 0 {
+		return nil
+	}
+	sort.SliceStable(unread, func(i, j int) bool {
+		left, right := m.counts[unread[i]], m.counts[unread[j]]
+		if left.MentionCount != right.MentionCount {
+			return left.MentionCount > right.MentionCount
+		}
+		return left.Latest > right.Latest
+	})
+	next := unread[0]
+	for index, id := range unread {
+		if id == m.activeConversation {
+			next = unread[(index+1)%len(unread)]
+			break
+		}
+	}
+	return m.openConversation(next)
 }
 
 func (m *Model) conversationNodeLabel(conversation slack.Conversation) string {

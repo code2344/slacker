@@ -205,13 +205,39 @@ func TestDecodeKittyPreviewPreservesGIFFrames(t *testing.T) {
 
 func TestJumboEmojiLinesRequireOneToThreeCustomEmoji(t *testing.T) {
 	m := &Model{emojiPreviews: map[string]kittyPreview{
-		"party\x00jumbo": {imageID: 42, columns: 4, rows: 3},
+		"party\x00jumbo": {imageID: 42, columns: 6, rows: 4},
 	}}
-	if lines := m.jumboEmojiLines(":party: :party:", "  "); len(lines) != 3 {
+	if lines := m.jumboEmojiLines(":party: :party:", "  "); len(lines) != 4 {
 		t.Fatalf("jumbo rows = %d", len(lines))
 	}
 	if lines := m.jumboEmojiLines(":party: words", "  "); lines != nil {
 		t.Fatalf("mixed text unexpectedly became jumbo: %#v", lines)
+	}
+}
+
+func TestCustomReactionUsesTwoCellPreview(t *testing.T) {
+	m := &Model{selfUserID: "U1", emojiPreviews: map[string]kittyPreview{
+		"party\x00reaction": {imageID: 42, columns: 2, rows: 2},
+	}}
+	lines := m.reactionLines([]slack.Reaction{{Name: "party", Count: 3, Users: []string{"U1"}}})
+	if len(lines) != 2 || len(lines[0]) < 4 || !strings.Contains(lines[0][3].Text, "3*") {
+		t.Fatalf("reaction lines = %#v", lines)
+	}
+}
+
+func TestNextUnreadPrefersMentions(t *testing.T) {
+	client, err := slack.NewClient(slack.Session{Token: "xoxc-test", Cookie: "xoxd-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(&config.Config{}, "Team", "U0",
+		[]slack.Conversation{{ID: "C1", Name: "general"}, {ID: "C2", Name: "help"}}, nil, nil, nil,
+		map[string]slack.ConversationCount{
+			"C1": {ID: "C1", UnreadCount: 5, Latest: "5"},
+			"C2": {ID: "C2", UnreadCount: 1, MentionCount: 1, Latest: "2"},
+		}, client)
+	if command := m.openNextUnread(); command == nil || m.activeConversation != "C2" {
+		t.Fatalf("active conversation = %q, command=%v", m.activeConversation, command)
 	}
 }
 
