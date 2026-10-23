@@ -8,7 +8,8 @@ import (
 	"hash/fnv"
 	"html"
 	"image"
-	_ "image/gif"
+	"image/draw"
+	"image/gif"
 	_ "image/jpeg"
 	"image/png"
 	"io"
@@ -49,6 +50,7 @@ type Model struct {
 	apps               *tree.Node
 	homeSidebarRoot    *tree.Node
 	dmSidebarRoot      *tree.Node
+	unreadSidebarRoot  *tree.Node
 	workspaceName      string
 	header             *tview.TextView
 	messages           *tree.Model
@@ -101,6 +103,8 @@ type kittyPreview struct {
 	columns int
 	rows    int
 	pngData []byte
+	frames  [][]byte
+	delays  []int
 }
 
 type completionCandidate struct {
@@ -296,6 +300,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	apps := tree.NewNode("Apps").SetExpanded(true).SetSelectable(false)
 	m.directMessages = dms
 	m.apps = apps
+	root.AddChild(tree.NewNode(m.unreadLabel()).SetReference(sidebarViewReference("unreads")))
 	root.AddChild(tree.NewNode("💬  DMs").SetReference(sidebarViewReference("dms")))
 	root.AddChild(dms)
 	sectionNodes := map[string]*tree.Node{}
@@ -322,26 +327,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 		byID[conversation.ID] = conversation
 	}
 	addConversation := func(parent *tree.Node, conversation slack.Conversation) {
-		name := conversation.Name
-		prefix := "# "
-		if conversation.IsIM || conversation.IsMPIM {
-			prefix = "@ "
-			if user, ok := m.users[conversation.User]; ok {
-				name = displayName(user)
-			}
-		} else if conversation.IsPrivate {
-			prefix = "🔒 "
-		}
-		if name == "" {
-			name = conversation.ID
-		}
-		if count := m.counts[conversation.ID]; count.UnreadCount > 0 || count.MentionCount > 0 || (count.Latest != "" && count.Latest > count.LastRead) {
-			prefix = "● " + prefix
-			if count.MentionCount > 0 {
-				name += fmt.Sprintf(" (%d)", count.MentionCount)
-			}
-		}
-		parent.AddChild(tree.NewNode(prefix + name).SetReference(conversation.ID))
+		parent.AddChild(tree.NewNode(m.conversationNodeLabel(conversation)).SetReference(conversation.ID))
 	}
 	for _, section := range sections {
 		parent := sectionNodes[section.ID]
@@ -405,6 +391,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 		root.AddChild(apps)
 	}
 	m.homeSidebarRoot, m.dmSidebarRoot = root, dmRoot
+	m.refreshUnreadSidebar()
 
 	m.sidebar.SetRoot(root).SetTopLevel(1).SetTitle(workspaceName)
 	ui.ConfigureBox(m.sidebar.Box, &m.cfg.Theme)
@@ -582,6 +569,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		switch reference := msg.Node.Reference().(type) {
 		case sidebarViewReference:
 			switch reference {
+			case "unreads":
+				m.refreshUnreadSidebar()
+				m.sidebar.SetRoot(m.unreadSidebarRoot).SetTitle("Unreads")
 			case "dms":
 				m.sidebar.SetRoot(m.dmSidebarRoot).SetTitle("Direct messages")
 			case "home":
@@ -713,6 +703,8 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			count := m.counts[msg.conversationID]
 			count.LastRead, count.UnreadCount, count.MentionCount = msg.timestamp, 0, 0
 			m.counts[msg.conversationID] = count
+			m.refreshUnreadSidebar()
+			m.refreshSidebarLabels()
 		}
 		return nil
 	case messageSentMsg:
@@ -870,7 +862,20 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			return m.reconnectRealtime()
 		}
 		commands := []tview.Cmd{m.nextRealtime()}
-		if msg.event.ConversationID() == m.activeConversation && (msg.event.Type == "message" || msg.event.Type == "reaction_added" || msg.event.Type == "reaction_removed") {
+		conversationID := msg.event.ConversationID()
+		if msg.event.Type == "message" && msg.event.Subtype == "" && conversationID != "" && msg.event.User != m.selfUserID && conversationID != m.activeConversation {
+			count := m.counts[conversationID]
+			count.ID = conversationID
+			count.Latest = msg.event.Timestamp
+			count.UnreadCount++
+			if strings.Contains(msg.event.Text, "<@"+m.selfUserID+">") {
+				count.MentionCount++
+			}
+			m.counts[conversationID] = count
+			m.refreshUnreadSidebar()
+			m.refreshSidebarLabels()
+		}
+		if conversationID == m.activeConversation && (msg.event.Type == "message" || msg.event.Type == "reaction_added" || msg.event.Type == "reaction_removed") {
 			if m.activeThread != "" {
 				commands = append(commands, m.loadThread(m.conversations[m.activeConversation], m.activeThread))
 			} else {
@@ -1092,7 +1097,26 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 		text := prepareMrkdwn(m.resolveSlackEntities(message.Text))
 		when := formatRelativeTimestamp(message.Timestamp, now)
 		reference := messageReference{conversation: conversation, message: message}
-		if compact {
+		if jumboLines := m.jumboEmojiLines(message.Text, func() string {
+			if compact {
+				return fmt.Sprintf("  %-14s  ", when)
+			}
+			return "  "
+		}()); len(jumboLines) > 0 {
+			if !compact {
+				root.AddChild(tree.NewNode(fmt.Sprintf("@%s  %s", author, when)).SetReference(messageProfileReference{messageReference: reference}))
+			}
+			for index, line := range jumboLines {
+				node := tree.NewNode("").SetLine(line)
+				if index == 0 {
+					node.SetReference(reference).SetExpanded(true)
+					latestNode = node
+				} else {
+					node.SetSelectable(false)
+				}
+				root.AddChild(node)
+			}
+		} else if compact {
 			latestNode = tree.NewNode("").SetLine(m.renderMessageLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
 			root.AddChild(latestNode)
 		} else {
@@ -1165,7 +1189,26 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 		when := formatRelativeTimestamp(message.Timestamp, now)
 		text := prepareMrkdwn(m.resolveSlackEntities(message.Text))
 		reference := messageReference{conversation: conversation, message: message, contextThread: m.activeThread}
-		if compact {
+		if jumboLines := m.jumboEmojiLines(message.Text, func() string {
+			if compact {
+				return fmt.Sprintf("  %-14s  ", when)
+			}
+			return "  "
+		}()); len(jumboLines) > 0 {
+			if !compact {
+				root.AddChild(tree.NewNode(fmt.Sprintf("@%s  %s", author, when)).SetReference(messageProfileReference{messageReference: reference}))
+			}
+			for index, line := range jumboLines {
+				node := tree.NewNode("").SetLine(line)
+				if index == 0 {
+					node.SetReference(reference).SetExpanded(true)
+					latestNode = node
+				} else {
+					node.SetSelectable(false)
+				}
+				root.AddChild(node)
+			}
+		} else if compact {
 			latestNode = tree.NewNode("").SetLine(m.renderMessageLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
 			root.AddChild(latestNode)
 		} else {
@@ -1692,7 +1735,7 @@ func (m *Model) loadWorkspaceEmojiPreviews(messages []slack.Message) tview.Cmd {
 			cachePath := ""
 			var data []byte
 			if cacheRoot != "" {
-				cachePath = filepath.Join(cacheRoot, "slacker", "emoji", fmt.Sprintf("%06x.png", imageID))
+				cachePath = filepath.Join(cacheRoot, "slacker", "emoji", fmt.Sprintf("%06x.asset", imageID))
 				data, _ = os.ReadFile(cachePath)
 			}
 			if len(data) == 0 {
@@ -1709,23 +1752,68 @@ func (m *Model) loadWorkspaceEmojiPreviews(messages []slack.Message) tview.Cmd {
 				if readErr != nil || response.StatusCode < 200 || response.StatusCode >= 300 || len(limited) > 2*1024*1024 {
 					continue
 				}
-				img, _, err := image.Decode(bytes.NewReader(limited))
-				if err != nil {
-					continue
-				}
-				var encoded bytes.Buffer
-				if png.Encode(&encoded, img) != nil {
-					continue
-				}
-				data = encoded.Bytes()
+				data = limited
 				if cachePath != "" && os.MkdirAll(filepath.Dir(cachePath), 0700) == nil {
 					_ = os.WriteFile(cachePath, data, 0600)
 				}
 			}
-			previews[name] = kittyPreview{imageID: imageID, columns: 1, rows: 1, pngData: data}
+			preview, err := decodeKittyPreview(data, imageID, 1, 1)
+			if err != nil {
+				continue
+			}
+			previews[name] = preview
+			jumbo := preview
+			jumbo.imageID = (imageID ^ 0x800000) & 0xFFFFFF
+			if jumbo.imageID == 0 {
+				jumbo.imageID = 1
+			}
+			jumbo.columns, jumbo.rows = 4, 3
+			previews[name+"\x00jumbo"] = jumbo
 		}
 		return workspaceEmojiPreviewsLoadedMsg{previews: previews}
 	}
+}
+
+func decodeKittyPreview(data []byte, imageID uint32, columns, rows int) (kittyPreview, error) {
+	if animation, err := gif.DecodeAll(bytes.NewReader(data)); err == nil && len(animation.Image) > 1 {
+		bounds := image.Rect(0, 0, animation.Config.Width, animation.Config.Height)
+		canvas := image.NewRGBA(bounds)
+		frames := make([][]byte, 0, len(animation.Image))
+		delays := make([]int, 0, len(animation.Image))
+		for index, frame := range animation.Image {
+			before := image.NewRGBA(bounds)
+			draw.Draw(before, bounds, canvas, bounds.Min, draw.Src)
+			draw.Draw(canvas, frame.Bounds(), frame, frame.Bounds().Min, draw.Over)
+			var encoded bytes.Buffer
+			if err := png.Encode(&encoded, canvas); err != nil {
+				return kittyPreview{}, err
+			}
+			frames = append(frames, encoded.Bytes())
+			delay := 100
+			if index < len(animation.Delay) && animation.Delay[index] > 0 {
+				delay = max(20, animation.Delay[index]*10)
+			}
+			delays = append(delays, delay)
+			if index < len(animation.Disposal) {
+				switch animation.Disposal[index] {
+				case gif.DisposalBackground:
+					draw.Draw(canvas, frame.Bounds(), image.Transparent, image.Point{}, draw.Src)
+				case gif.DisposalPrevious:
+					canvas = before
+				}
+			}
+		}
+		return kittyPreview{imageID: imageID, columns: columns, rows: rows, pngData: frames[0], frames: frames[1:], delays: delays}, nil
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return kittyPreview{}, err
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		return kittyPreview{}, err
+	}
+	return kittyPreview{imageID: imageID, columns: columns, rows: rows, pngData: encoded.Bytes()}, nil
 }
 
 func (m *Model) search(query string) tview.Cmd {
@@ -1873,7 +1961,13 @@ func openLocalFile(path string) error {
 }
 
 func kittyImagePayload(pngData []byte, imageID uint32, columns, rows int) string {
-	payload := base64.StdEncoding.EncodeToString(pngData)
+	return kittyChunkedPayload(pngData,
+		fmt.Sprintf("a=T,f=100,q=2,U=1,C=1,i=%d,c=%d,r=%d", imageID, columns, rows),
+		"q=2")
+}
+
+func kittyChunkedPayload(data []byte, firstControl, continuationControl string) string {
+	payload := base64.StdEncoding.EncodeToString(data)
 	var output bytes.Buffer
 	for first := true; len(payload) > 0; first = false {
 		chunkSize := min(4096, len(payload))
@@ -1883,9 +1977,9 @@ func kittyImagePayload(pngData []byte, imageID uint32, columns, rows int) string
 			more = 1
 		}
 		if first {
-			fmt.Fprintf(&output, "\x1b_Ga=T,f=100,q=2,U=1,C=1,i=%d,c=%d,r=%d,m=%d;%s\x1b\\", imageID, columns, rows, more, chunk)
+			fmt.Fprintf(&output, "\x1b_G%s,m=%d;%s\x1b\\", firstControl, more, chunk)
 		} else {
-			fmt.Fprintf(&output, "\x1b_Gq=2,m=%d;%s\x1b\\", more, chunk)
+			fmt.Fprintf(&output, "\x1b_G%s,m=%d;%s\x1b\\", continuationControl, more, chunk)
 		}
 		payload = rest
 	}
@@ -1920,6 +2014,43 @@ func kittyPlaceholderLines(preview kittyPreview) []styledtext.Line {
 	return lines
 }
 
+func (m *Model) jumboEmojiLines(value, prefix string) []styledtext.Line {
+	trimmed := strings.TrimSpace(value)
+	aliases := emojiAliasPattern.FindAllString(trimmed, -1)
+	if len(aliases) < 1 || len(aliases) > 3 || strings.TrimSpace(emojiAliasPattern.ReplaceAllString(trimmed, "")) != "" {
+		return nil
+	}
+	previews := make([]kittyPreview, 0, len(aliases))
+	for _, alias := range aliases {
+		name := strings.Trim(alias, ":")
+		preview, ok := m.emojiPreviews[name+"\x00jumbo"]
+		if !ok {
+			return nil
+		}
+		previews = append(previews, preview)
+	}
+	lines := make([]styledtext.Line, 3)
+	for row := range lines {
+		if row == 0 {
+			lines[row] = styledtext.Line{styledtext.NewSegment(prefix, tcell.StyleDefault)}
+		} else {
+			lines[row] = styledtext.Line{styledtext.NewSegment(strings.Repeat(" ", len([]rune(prefix))), tcell.StyleDefault)}
+		}
+		for _, preview := range previews {
+			red := int32((preview.imageID >> 16) & 0xff)
+			green := int32((preview.imageID >> 8) & 0xff)
+			blue := int32(preview.imageID & 0xff)
+			style := tcell.StyleDefault.Foreground(tcell.NewRGBColor(red, green, blue))
+			for column := range 4 {
+				cell := string([]rune{0x10EEEE, kittyDiacritics[row], kittyDiacritics[column]})
+				lines[row] = append(lines[row], styledtext.NewSegment(cell, style))
+			}
+			lines[row] = append(lines[row], styledtext.NewSegment(" ", tcell.StyleDefault))
+		}
+	}
+	return lines
+}
+
 func uploadKittyPreviews(previews map[string]kittyPreview) tview.Cmd {
 	if len(previews) == 0 {
 		return nil
@@ -1932,7 +2063,26 @@ func uploadKittyPreviews(previews map[string]kittyPreview) tview.Cmd {
 	commands := make([]tview.Cmd, 0, len(ids)+1)
 	for _, id := range ids {
 		preview := previews[id]
-		commands = append(commands, tview.Raw(kittyImagePayload(preview.pngData, preview.imageID, preview.columns, preview.rows)))
+		var payload strings.Builder
+		payload.WriteString(kittyImagePayload(preview.pngData, preview.imageID, preview.columns, preview.rows))
+		if len(preview.frames) > 0 {
+			rootDelay := 100
+			if len(preview.delays) > 0 {
+				rootDelay = preview.delays[0]
+			}
+			fmt.Fprintf(&payload, "\x1b_Ga=a,q=2,i=%d,r=1,z=%d\x1b\\", preview.imageID, rootDelay)
+			for index, frame := range preview.frames {
+				delay := 100
+				if index+1 < len(preview.delays) {
+					delay = preview.delays[index+1]
+				}
+				payload.WriteString(kittyChunkedPayload(frame,
+					fmt.Sprintf("a=f,f=100,q=2,i=%d,z=%d", preview.imageID, delay),
+					"a=f,q=2"))
+			}
+			fmt.Fprintf(&payload, "\x1b_Ga=a,q=2,i=%d,s=3,v=1\x1b\\", preview.imageID)
+		}
+		commands = append(commands, tview.Raw(payload.String()))
 	}
 	commands = append(commands, func() tview.Msg { return kittyUploadedMsg{} })
 	return tview.Sequence(commands...)
@@ -2348,6 +2498,104 @@ func (m *Model) addDirectMessage(conversation slack.Conversation) {
 	if m.dmSidebarRoot != nil {
 		m.dmSidebarRoot.AddChild(tree.NewNode("@ " + strings.TrimPrefix(m.conversationTitle(conversation), "@")).SetReference(conversation.ID))
 	}
+}
+
+func (m *Model) unreadLabel() string {
+	unread, mentions := 0, 0
+	for _, count := range m.counts {
+		if count.UnreadCount > 0 || count.MentionCount > 0 || (count.Latest != "" && count.Latest > count.LastRead) {
+			unread++
+		}
+		mentions += count.MentionCount
+	}
+	if mentions > 0 {
+		return fmt.Sprintf("●  Unreads (%d mentions)", mentions)
+	}
+	if unread > 0 {
+		return fmt.Sprintf("●  Unreads (%d)", unread)
+	}
+	return "○  Unreads"
+}
+
+func (m *Model) conversationNodeLabel(conversation slack.Conversation) string {
+	name := conversation.Name
+	prefix := "# "
+	if conversation.IsIM || conversation.IsMPIM {
+		prefix = "@ "
+		if user, ok := m.users[conversation.User]; ok {
+			name = displayName(user)
+		}
+	} else if conversation.IsPrivate {
+		prefix = "🔒 "
+	}
+	if name == "" {
+		name = conversation.ID
+	}
+	count := m.counts[conversation.ID]
+	if count.UnreadCount > 0 || count.MentionCount > 0 || (count.Latest != "" && count.Latest > count.LastRead) {
+		prefix = "● " + prefix
+		if count.MentionCount > 0 {
+			name += fmt.Sprintf(" (%d)", count.MentionCount)
+		}
+	}
+	return prefix + name
+}
+
+func (m *Model) refreshUnreadSidebar() {
+	old := m.unreadSidebarRoot
+	root := tree.NewNode("")
+	root.AddChild(tree.NewNode("← Home").SetReference(sidebarViewReference("home")))
+	var unread []slack.Conversation
+	for id, count := range m.counts {
+		if count.UnreadCount == 0 && count.MentionCount == 0 && (count.Latest == "" || count.Latest <= count.LastRead) {
+			continue
+		}
+		if conversation, ok := m.conversations[id]; ok {
+			unread = append(unread, conversation)
+		}
+	}
+	sort.SliceStable(unread, func(i, j int) bool {
+		left, right := m.counts[unread[i].ID], m.counts[unread[j].ID]
+		if left.MentionCount != right.MentionCount {
+			return left.MentionCount > right.MentionCount
+		}
+		return left.Latest > right.Latest
+	})
+	if len(unread) == 0 {
+		root.AddChild(tree.NewNode("No unread conversations").SetSelectable(false))
+	}
+	for _, conversation := range unread {
+		root.AddChild(tree.NewNode(m.conversationNodeLabel(conversation)).SetReference(conversation.ID))
+	}
+	m.unreadSidebarRoot = root
+	if old != nil && m.sidebar != nil && m.sidebar.Root() == old {
+		m.sidebar.SetRoot(root).SetTopLevel(1).SetTitle("Unreads")
+	}
+}
+
+func (m *Model) refreshSidebarLabels() {
+	seen := map[*tree.Node]bool{}
+	var refresh func(*tree.Node)
+	refresh = func(node *tree.Node) {
+		if node == nil || seen[node] {
+			return
+		}
+		seen[node] = true
+		if reference, ok := node.Reference().(string); ok {
+			if conversation, exists := m.conversations[reference]; exists {
+				node.SetLine(styledtext.Line{styledtext.NewSegment(m.conversationNodeLabel(conversation), tcell.StyleDefault)})
+			}
+		}
+		if reference, ok := node.Reference().(sidebarViewReference); ok && reference == "unreads" {
+			node.SetLine(styledtext.Line{styledtext.NewSegment(m.unreadLabel(), tcell.StyleDefault)})
+		}
+		for _, child := range node.Children() {
+			refresh(child)
+		}
+	}
+	refresh(m.homeSidebarRoot)
+	refresh(m.dmSidebarRoot)
+	refresh(m.unreadSidebarRoot)
 }
 
 func conversationActivity(conversation slack.Conversation) string {

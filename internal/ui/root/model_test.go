@@ -1,7 +1,11 @@
 package root
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/gif"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -156,8 +160,58 @@ func TestDirectMessagesStayInDedicatedSidebarGroup(t *testing.T) {
 	if len(m.directMessages.Children()) != 1 || m.directMessages.Children()[0].Reference() != "D1" {
 		t.Fatalf("DM rows = %#v", m.directMessages.Children())
 	}
-	if got := m.sidebar.Root().Children()[1]; got != m.directMessages {
+	found := false
+	for _, child := range m.sidebar.Root().Children() {
+		found = found || child == m.directMessages
+	}
+	if !found {
 		t.Fatal("direct messages group is not attached to the sidebar")
+	}
+}
+
+func TestUnreadSidebarRanksMentionsAndClearsReadConversation(t *testing.T) {
+	conversations := []slack.Conversation{{ID: "C1", Name: "general"}, {ID: "C2", Name: "help"}}
+	counts := map[string]slack.ConversationCount{
+		"C1": {ID: "C1", UnreadCount: 2, Latest: "2"},
+		"C2": {ID: "C2", UnreadCount: 1, MentionCount: 1, Latest: "3"},
+	}
+	m := NewModel(&config.Config{}, "Team", "U0", conversations, nil, nil, nil, counts, nil)
+	rows := m.unreadSidebarRoot.Children()
+	if len(rows) != 3 || rows[1].Reference() != "C2" || rows[2].Reference() != "C1" {
+		t.Fatalf("unread rows = %#v", rows)
+	}
+	m.Update(conversationMarkedMsg{conversationID: "C2", timestamp: "3"})
+	rows = m.unreadSidebarRoot.Children()
+	if len(rows) != 2 || rows[1].Reference() != "C1" {
+		t.Fatalf("rows after marking read = %#v", rows)
+	}
+}
+
+func TestDecodeKittyPreviewPreservesGIFFrames(t *testing.T) {
+	palette := color.Palette{color.Transparent, color.RGBA{R: 255, A: 255}}
+	first := image.NewPaletted(image.Rect(0, 0, 2, 2), palette)
+	second := image.NewPaletted(image.Rect(0, 0, 2, 2), palette)
+	first.SetColorIndex(0, 0, 1)
+	second.SetColorIndex(1, 1, 1)
+	var encoded bytes.Buffer
+	if err := gif.EncodeAll(&encoded, &gif.GIF{Image: []*image.Paletted{first, second}, Delay: []int{5, 8}}); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := decodeKittyPreview(encoded.Bytes(), 42, 1, 1)
+	if err != nil || len(preview.frames) != 1 || len(preview.delays) != 2 || preview.delays[0] != 50 || preview.delays[1] != 80 {
+		t.Fatalf("animated preview = %#v, %v", preview, err)
+	}
+}
+
+func TestJumboEmojiLinesRequireOneToThreeCustomEmoji(t *testing.T) {
+	m := &Model{emojiPreviews: map[string]kittyPreview{
+		"party\x00jumbo": {imageID: 42, columns: 4, rows: 3},
+	}}
+	if lines := m.jumboEmojiLines(":party: :party:", "  "); len(lines) != 3 {
+		t.Fatalf("jumbo rows = %d", len(lines))
+	}
+	if lines := m.jumboEmojiLines(":party: words", "  "); lines != nil {
+		t.Fatalf("mixed text unexpectedly became jumbo: %#v", lines)
 	}
 }
 

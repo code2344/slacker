@@ -11,10 +11,10 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Channel history and channel message sending
 - [x] Thread history and thread replies
 - [x] DM display names and message author names with background resolution and persistent profile caching
-- [~] Unread and mention markers
+- [x] Live unread and mention markers
 - [x] Slack-style right-hand thread pane
-- [~] Mark conversations read on open; persistent per-message read position remains planned
-- [ ] More-unreads navigation and unread-only view
+- [x] Mark conversations read on open and update every sidebar view
+- [~] Unread-only view with mention-first ordering; next-unread keyboard navigation remains planned
 - [ ] Browse/search/join/leave/create/archive channels
 - [~] Start one-to-one DMs from profiles; group DM creation remains planned
 - [ ] Channel topics, purposes, bookmarks, tabs, and member lists
@@ -38,7 +38,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Display reaction names, counts, and whether you reacted
 - [x] Add common reactions and remove your own reactions
 - [ ] Full emoji picker and reacting-user list
-- [~] Standard Unicode emoji and workspace aliases render inline; custom workspace emoji render on demand through Kitty graphics and are cached; skin tones and a picker remain planned
+- [~] Standard Unicode emoji and workspace aliases render inline; custom workspace emoji render on demand through Kitty graphics, GIF emoji animate, and emoji-only custom messages use jumbo rendering; skin tones and a picker remain planned
 
 ## People and presence
 

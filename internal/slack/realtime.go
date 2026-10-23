@@ -15,6 +15,8 @@ type RealtimeEvent struct {
 	Type      string  `json:"type"`
 	Subtype   string  `json:"subtype"`
 	Channel   string  `json:"channel"`
+	User      string  `json:"user"`
+	Text      string  `json:"text"`
 	Timestamp string  `json:"ts"`
 	ThreadTS  string  `json:"thread_ts"`
 	Message   Message `json:"message"`
