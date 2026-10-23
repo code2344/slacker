@@ -94,6 +94,20 @@ type kittyPreview struct {
 	pngData []byte
 }
 
+type completionCandidate struct {
+	label       string
+	replacement string
+}
+
+var standardEmojiNames = sync.OnceValue(func() []string {
+	names := make([]string, 0, len(emoji.CodeMap()))
+	for alias := range emoji.CodeMap() {
+		names = append(names, strings.Trim(alias, ":"))
+	}
+	sort.Strings(names)
+	return names
+})
+
 const (
 	mainSidebarIndex    = 0
 	mainMessagesIndex   = 1
@@ -373,7 +387,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	m.composer.SetDisabled(true)
 	m.composer.SetTitle("Composer")
 	ui.ConfigureBox(m.composer.Box, &m.cfg.Theme)
-	m.controls.SetText("  Enter send/open   ↑ older at top   t thread   r react   e edit   d delete   / search   Esc close").SetScrollable(false).SetWrap(false)
+	m.controls.SetText("  Enter send   Shift+Enter newline   Tab complete   ↑ older at top   t thread   r react   e edit   d delete   / search").SetScrollable(false).SetWrap(false)
 
 	m.right.SetDirection(flex.DirectionRow).
 		AddItem(m.header, 2, 0, false).
@@ -450,6 +464,15 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.closeInspector()
 			return nil
 		}
+		if msg.Key() == tcell.KeyTab {
+			if composer := m.focusedComposer(); composer != nil {
+				if completed, label, ok := m.completeComposerText(composer.Text()); ok {
+					composer.SetText(completed, true)
+					composer.SetTitle("Completed " + label + " · Enter sends · Shift+Enter newline")
+					return nil
+				}
+			}
+		}
 		if (msg.Key() == tcell.KeyUp || msg.Key() == tcell.KeyPgUp) && m.main.Focused() == mainMessagesIndex && m.right.Focused() == rightMessagesIndex && m.currentHasMore && !m.historyLoading && m.atOldestMessage() {
 			m.historyLoading = true
 			m.messages.SetTitle("Loading older messages…")
@@ -494,7 +517,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.right.SetFocus(rightComposerIndex)
 			return nil
 		}
-		if msg.Key() == tcell.KeyEnter && m.activeThread != "" && m.main.Focused() == mainInspectorIndex && m.inspector.Focused() == threadComposerIndex {
+		if msg.Key() == tcell.KeyEnter && msg.Modifiers() == tcell.ModNone && m.activeThread != "" && m.main.Focused() == mainInspectorIndex && m.inspector.Focused() == threadComposerIndex {
 			text := strings.TrimSpace(m.threadComposer.Text())
 			if text != "" {
 				m.threadComposer.SetDisabled(true)
@@ -505,7 +528,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 				return m.sendMessage(m.conversations[m.activeConversation], text, m.activeThread)
 			}
 		}
-		if msg.Key() == tcell.KeyEnter && m.activeConversation != "" && m.main.Focused() == mainMessagesIndex && m.right.Focused() == rightComposerIndex {
+		if msg.Key() == tcell.KeyEnter && msg.Modifiers() == tcell.ModNone && m.activeConversation != "" && m.main.Focused() == mainMessagesIndex && m.right.Focused() == rightComposerIndex {
 			text := strings.TrimSpace(m.composer.Text())
 			if text != "" {
 				if m.searchMode {
@@ -1984,6 +2007,71 @@ func (m *Model) saveActiveDraft() {
 
 func (m *Model) restoreConversationDraft(conversationID string) {
 	m.composer.SetText(m.drafts[conversationID], true)
+}
+
+func (m *Model) focusedComposer() *tview.TextArea {
+	if m.main.Focused() == mainMessagesIndex && m.right.Focused() == rightComposerIndex {
+		return m.composer
+	}
+	if m.inspectorVisible && m.main.Focused() == mainInspectorIndex && m.inspector.Focused() == threadComposerIndex {
+		return m.threadComposer
+	}
+	return nil
+}
+
+func (m *Model) completeComposerText(value string) (string, string, bool) {
+	start := len(value)
+	for start > 0 {
+		previous := value[start-1]
+		if previous == ' ' || previous == '\n' || previous == '\t' {
+			break
+		}
+		start--
+	}
+	token := value[start:]
+	if len(token) < 1 {
+		return value, "", false
+	}
+	prefix := token[0]
+	if prefix != '@' && prefix != '#' && prefix != ':' {
+		return value, "", false
+	}
+	query := strings.ToLower(strings.TrimPrefix(token, string(prefix)))
+	var candidates []completionCandidate
+	switch prefix {
+	case '@':
+		for id, user := range m.users {
+			name := displayName(user)
+			if name == "" || (!strings.HasPrefix(strings.ToLower(name), query) && !strings.HasPrefix(strings.ToLower(user.Name), query)) {
+				continue
+			}
+			candidates = append(candidates, completionCandidate{label: "@" + name, replacement: "<@" + id + ">"})
+		}
+	case '#':
+		for id, conversation := range m.conversations {
+			if conversation.IsIM || conversation.IsMPIM || conversation.Name == "" || !strings.HasPrefix(strings.ToLower(conversation.Name), query) {
+				continue
+			}
+			candidates = append(candidates, completionCandidate{label: "#" + conversation.Name, replacement: "<#" + id + "|" + conversation.Name + ">"})
+		}
+	case ':':
+		for _, name := range standardEmojiNames() {
+			if strings.HasPrefix(strings.ToLower(name), query) {
+				candidates = append(candidates, completionCandidate{label: ":" + name + ":", replacement: ":" + name + ":"})
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return value, "", false
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if len(candidates[i].label) == len(candidates[j].label) {
+			return candidates[i].label < candidates[j].label
+		}
+		return len(candidates[i].label) < len(candidates[j].label)
+	})
+	choice := candidates[0]
+	return value[:start] + choice.replacement + " ", choice.label, true
 }
 
 func (m *Model) openDM(userID string) tview.Cmd {

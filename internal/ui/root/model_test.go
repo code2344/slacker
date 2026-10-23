@@ -248,6 +248,49 @@ func TestEnterInComposerDispatchesMessageSend(t *testing.T) {
 	}
 }
 
+func TestShiftEnterInComposerInsertsNewlineWithoutSending(t *testing.T) {
+	conversation := slack.Conversation{ID: "C1", Name: "general", IsChannel: true}
+	m := NewModel(&config.Config{}, "Team", "U1", []slack.Conversation{conversation}, nil, nil, nil, nil, nil)
+	m.activeConversation = conversation.ID
+	m.composer.SetDisabled(false)
+	m.composer.SetText("first line", true)
+	m.main.SetFocus(mainMessagesIndex)
+	m.right.SetFocus(rightComposerIndex)
+
+	cmd := m.Update(tcell.NewEventKey(tcell.KeyEnter, "", tcell.ModShift))
+	if cmd != nil {
+		t.Fatal("Shift+Enter unexpectedly dispatched a command")
+	}
+	if got := m.composer.Text(); got != "first line\n" {
+		t.Fatalf("composer text = %q", got)
+	}
+}
+
+func TestComposerCompletesUsersChannelsAndEmoji(t *testing.T) {
+	user := slack.User{ID: "U1", Name: "ruben"}
+	user.Profile.DisplayName = "Ruben"
+	m := &Model{
+		users: map[string]slack.User{"U1": user},
+		conversations: map[string]slack.Conversation{
+			"C1": {ID: "C1", Name: "lounge", IsChannel: true},
+		},
+	}
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"hello @rub", "hello <@U1> "},
+		{"see #lou", "see <#C1|lounge> "},
+		{"nice :wav", "nice :wave: "},
+	}
+	for _, test := range tests {
+		got, _, ok := m.completeComposerText(test.input)
+		if !ok || got != test.want {
+			t.Errorf("completeComposerText(%q) = %q, %v; want %q", test.input, got, ok, test.want)
+		}
+	}
+}
+
 func TestMainComposerNeverSendsIntoOpenThread(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {

@@ -25,8 +25,8 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Plain-text channel messages and replies
 - [x] Slack mrkdwn display for emphasis, strike, inline/fenced code, quotes, links, mentions, channels, dates, and entities
 - [x] Edit and delete your own messages
-- [~] Rich composer: Slack mrkdwn is sent correctly; formatting toolbar and autocomplete remain planned
-- [ ] Mentions and channel/user/emoji autocomplete
+- [~] Rich composer: Slack mrkdwn, multiline input, and inline completion work; formatting toolbar remains planned
+- [~] Tab completion for known users, channels, and standard emoji; popup selection and workspace emoji remain planned
 - [~] In-session channel and thread drafts; persistence and scheduled messages remain planned
 - [ ] Forward/share messages and copy permalinks
 - [ ] Pin/unpin, save-for-later, reminders, and follow-thread controls
