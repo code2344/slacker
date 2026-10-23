@@ -151,6 +151,20 @@ func (c *Client) DeleteMessage(ctx context.Context, channel, timestamp string) e
 	return c.Call(ctx, "chat.delete", url.Values{"channel": {channel}, "ts": {timestamp}}, nil)
 }
 
+func (c *Client) MessagePermalink(ctx context.Context, channel, timestamp string) (string, error) {
+	var result struct {
+		Permalink string `json:"permalink"`
+	}
+	err := c.Call(ctx, "chat.getPermalink", url.Values{"channel": {channel}, "message_ts": {timestamp}}, &result)
+	if err != nil {
+		return "", err
+	}
+	if result.Permalink == "" {
+		return "", errors.New("Slack returned no message permalink")
+	}
+	return result.Permalink, nil
+}
+
 func (c *Client) AddReaction(ctx context.Context, channel, timestamp, name string) error {
 	return c.Call(ctx, "reactions.add", url.Values{"channel": {channel}, "timestamp": {timestamp}, "name": {name}}, nil)
 }

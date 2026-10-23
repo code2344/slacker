@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"html"
@@ -90,6 +91,7 @@ type Model struct {
 	activityBodies     map[string]slack.ActivityMessage
 	activityView       bool
 	activityHydrated   bool
+	activityFallback   bool
 	pendingMessageTS   string
 	searchMode         bool
 	selfUserID         string
@@ -243,10 +245,16 @@ type activityBodiesLoadedMsg struct {
 	bodies map[string]slack.ActivityMessage
 	err    error
 }
+type activityFallbackLoadedMsg struct {
+	items  []slack.ActivityItem
+	bodies map[string]slack.ActivityMessage
+	err    error
+}
 type fileOpenedMsg struct {
 	path string
 	err  error
 }
+type permalinkCopiedMsg struct{ err error }
 type dmOpenedMsg struct {
 	conversation slack.Conversation
 	err          error
@@ -440,7 +448,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	m.composer.SetDisabled(true)
 	m.composer.SetTitle("Composer")
 	ui.ConfigureBox(m.composer.Box, &m.cfg.Theme)
-	m.controls.SetText("  Enter send   Shift+Enter newline   Tab complete   u next unread   ↑ older   t thread   r react   e edit   d delete   / search").SetScrollable(false).SetWrap(false)
+	m.controls.SetText("  Enter send   Shift+Enter newline   Tab complete   u next unread   ↑ older   t thread   r react   p copy link   e edit   d delete   / search").SetScrollable(false).SetWrap(false)
 
 	m.right.SetDirection(flex.DirectionRow).
 		AddItem(m.header, 2, 0, false).
@@ -584,6 +592,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			case "r":
 				m.openReactionPicker(reference)
 				return nil
+			case "p":
+				m.messages.SetTitle("Copying message link…")
+				return m.copyMessagePermalink(reference)
 			case "-":
 				own := ownReactionNames(reference.message.Reactions, m.selfUserID)
 				if len(own) > 0 {
@@ -882,11 +893,17 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		}
 	case activityLoadedMsg:
 		if msg.err != nil {
+			var apiErr *slack.APIError
+			if errors.As(msg.err, &apiErr) && apiErr.Code == "team_is_restricted" {
+				m.messages.SetTitle("Activity · loading compatible view…")
+				return m.loadActivityFallback()
+			}
 			m.messages.SetTitle("Activity failed")
 			m.messages.SetRoot(tree.NewNode("").AddChild(tree.NewNode(msg.err.Error()).SetSelectable(false))).SetTopLevel(1)
 			break
 		}
 		m.activityItems = msg.feed.Items
+		m.activityFallback = false
 		m.activityHydrated = false
 		m.showActivity()
 		refs := make(map[string][]string)
@@ -900,6 +917,21 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			commands = append(commands, m.loadAuthors(userIDs, nil, nil))
 		}
 		return tview.Batch(commands...)
+	case activityFallbackLoadedMsg:
+		if msg.err != nil {
+			m.messages.SetTitle("Activity failed")
+			m.messages.SetRoot(tree.NewNode("").AddChild(tree.NewNode(msg.err.Error()).SetSelectable(false))).SetTopLevel(1)
+			break
+		}
+		m.activityItems, m.activityBodies = msg.items, msg.bodies
+		m.activityFallback = true
+		m.activityHydrated = true
+		m.header.SetText("Activity\nUnread mentions and direct messages").SetScrollable(false).SetWrap(false)
+		m.showActivity()
+		m.messages.SetTitle("Activity · compatible view")
+		if userIDs := m.unresolvedActivityUserIDs(); len(userIDs) > 0 {
+			return m.loadAuthors(userIDs, nil, nil)
+		}
 	case activityBodiesLoadedMsg:
 		m.activityHydrated = true
 		if msg.err == nil {
@@ -965,6 +997,13 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		} else {
 			m.messages.SetTitle("Opened " + msg.path)
 		}
+	case permalinkCopiedMsg:
+		if msg.err != nil {
+			m.messages.SetTitle("Copy link failed: " + msg.err.Error())
+		} else {
+			m.messages.SetTitle("Message link copied")
+		}
+		return nil
 	case realtimeConnectedMsg:
 		if msg.err != nil {
 			return m.reconnectRealtime()
@@ -2244,6 +2283,7 @@ func (m *Model) openActivity() {
 	m.saveActiveDraft()
 	m.closeInspector()
 	m.activityView = true
+	m.activityFallback = false
 	m.header.SetText("Activity\nMentions, thread replies, reactions, and direct messages").SetScrollable(false).SetWrap(false)
 	m.messages.SetRoot(tree.NewNode("").AddChild(tree.NewNode("Loading activity…").SetSelectable(false))).SetTopLevel(1).SetTitle("Activity")
 	m.composer.SetText("", false)
@@ -2271,6 +2311,73 @@ func (m *Model) loadActivityBodies(refs map[string][]string) tview.Cmd {
 		bodies, err := m.client.ActivityMessages(ctx, refs)
 		return activityBodiesLoadedMsg{bodies: bodies, err: err}
 	}
+}
+
+func (m *Model) loadActivityFallback() tview.Cmd {
+	type target struct {
+		conversation slack.Conversation
+		count        slack.ConversationCount
+	}
+	targets := make([]target, 0)
+	for id, count := range m.counts {
+		conversation, ok := m.conversations[id]
+		unreadDM := ok && (conversation.IsIM || conversation.IsMPIM) && (count.UnreadCount > 0 || (count.Latest != "" && count.Latest > count.LastRead))
+		if !ok || (count.MentionCount == 0 && !unreadDM) {
+			continue
+		}
+		targets = append(targets, target{conversation: conversation, count: count})
+	}
+	sort.SliceStable(targets, func(i, j int) bool { return targets[i].count.Latest > targets[j].count.Latest })
+	if len(targets) > 24 {
+		targets = targets[:24]
+	}
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		items := make([]slack.ActivityItem, 0)
+		bodies := make(map[string]slack.ActivityMessage)
+		for _, target := range targets {
+			messages, _, _, err := m.client.ConversationHistoryPage(ctx, target.conversation.ID, 100, "")
+			if err != nil {
+				continue
+			}
+			fallbackItems, fallbackBodies := fallbackActivityForConversation(target.conversation, target.count, messages, m.selfUserID)
+			items = append(items, fallbackItems...)
+			for key, body := range fallbackBodies {
+				bodies[key] = body
+			}
+		}
+		sort.SliceStable(items, func(i, j int) bool { return items[i].FeedTS > items[j].FeedTS })
+		if len(items) > 50 {
+			items = items[:50]
+		}
+		return activityFallbackLoadedMsg{items: items, bodies: bodies}
+	}
+}
+
+func fallbackActivityForConversation(conversation slack.Conversation, count slack.ConversationCount, messages []slack.Message, selfUserID string) ([]slack.ActivityItem, map[string]slack.ActivityMessage) {
+	items := make([]slack.ActivityItem, 0)
+	bodies := make(map[string]slack.ActivityMessage)
+	mention := "<@" + selfUserID + ">"
+	for _, message := range messages {
+		if message.Timestamp == "" || (count.LastRead != "" && message.Timestamp <= count.LastRead) || message.User == selfUserID {
+			continue
+		}
+		itemType := ""
+		switch {
+		case conversation.IsIM || conversation.IsMPIM:
+			itemType = "dm"
+		case selfUserID != "" && strings.Contains(message.Text, mention):
+			itemType = "at_user"
+		}
+		if itemType == "" {
+			continue
+		}
+		key := "fallback:" + conversation.ID + ":" + message.Timestamp
+		items = append(items, slack.ActivityItem{Key: key, Type: itemType, IsUnread: true, FeedTS: message.Timestamp, ChannelID: conversation.ID, Timestamp: message.Timestamp, ThreadTS: message.ThreadTS, AuthorID: message.User})
+		bodies[slack.ActivityMessageKey(conversation.ID, message.Timestamp)] = slack.ActivityMessage{Text: message.Text, UserID: message.User}
+	}
+	return items, bodies
 }
 
 func (m *Model) showActivity() {
@@ -2330,7 +2437,11 @@ func (m *Model) showActivity() {
 		}
 		root.AddChild(tree.NewNode("").SetSelectable(false))
 	}
-	m.messages.SetRoot(root).SetTopLevel(1).SetTitle("Activity")
+	title := "Activity"
+	if m.activityFallback {
+		title = "Activity · compatible view"
+	}
+	m.messages.SetRoot(root).SetTopLevel(1).SetTitle(title)
 	if selectedNode != nil {
 		m.messages.SetCurrentNode(selectedNode)
 	} else if children := root.Children(); len(children) > 0 && children[0].Reference() != nil {
@@ -2412,6 +2523,46 @@ func (m *Model) showSearchResults(result searchLoadedMsg) {
 	}
 	m.messages.SetRoot(root).SetTopLevel(1).SetTitle("Search: " + result.query)
 	m.right.SetFocus(rightMessagesIndex)
+}
+
+func (m *Model) copyMessagePermalink(reference messageReference) tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		permalink, err := m.client.MessagePermalink(ctx, reference.conversation.ID, reference.message.Timestamp)
+		if err != nil {
+			return permalinkCopiedMsg{err: err}
+		}
+		return permalinkCopiedMsg{err: copyText(permalink)}
+	}
+}
+
+func copyText(value string) error {
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		command = exec.Command("pbcopy")
+	case "windows":
+		command = exec.Command("cmd", "/c", "clip")
+	default:
+		for _, candidate := range [][]string{{"wl-copy"}, {"xclip", "-selection", "clipboard"}, {"xsel", "--clipboard", "--input"}} {
+			if _, err := exec.LookPath(candidate[0]); err == nil {
+				command = exec.Command(candidate[0], candidate[1:]...)
+				break
+			}
+		}
+	}
+	if command == nil {
+		return errors.New("no clipboard utility found (install wl-copy, xclip, or xsel)")
+	}
+	command.Stdin = strings.NewReader(value)
+	if output, err := command.CombinedOutput(); err != nil {
+		if detail := strings.TrimSpace(string(output)); detail != "" {
+			return fmt.Errorf("copy to clipboard: %w: %s", err, detail)
+		}
+		return fmt.Errorf("copy to clipboard: %w", err)
+	}
+	return nil
 }
 
 func (m *Model) downloadAndOpen(file slack.File) tview.Cmd {

@@ -185,6 +185,30 @@ func TestMarkConversationFallsBackForIM(t *testing.T) {
 	}
 }
 
+func TestMessagePermalink(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat.getPermalink" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("channel") != "C123" || r.Form.Get("message_ts") != "200.1" {
+			t.Errorf("form = %#v", r.Form)
+		}
+		io.WriteString(w, `{"ok":true,"permalink":"https://example.slack.com/archives/C123/p2001"}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	permalink, err := client.MessagePermalink(context.Background(), "C123", "200.1")
+	if err != nil || permalink != "https://example.slack.com/archives/C123/p2001" {
+		t.Fatalf("MessagePermalink() = %q, %v", permalink, err)
+	}
+}
+
 func TestPostMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/chat.postMessage" {

@@ -28,7 +28,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [~] Rich composer: Slack mrkdwn, multiline input, and inline completion work; formatting toolbar remains planned
 - [~] Tab completion for known users, channels, standard emoji, and cached workspace emoji; popup selection remains planned
 - [~] In-session channel and thread drafts; persistence and scheduled messages remain planned
-- [ ] Forward/share messages and copy permalinks
+- [~] Copy message permalinks; forwarding/sharing remains planned
 - [ ] Pin/unpin, save-for-later, reminders, and follow-thread controls
 - [~] Keyboard message actions; Slack app/workflow actions remain planned
 - [ ] Translation and accessibility alt-text prompts
@@ -62,7 +62,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 ## Search and activity
 
 - [~] Message and file search; channel/people search and richer filters remain planned
-- [x] Activity view with mentions, thread replies, reactions, DMs, channel notifications, reminders, and direct navigation
+- [~] Activity view with mentions, thread replies, reactions, DMs, channel notifications, reminders, and direct navigation; restricted workspaces use an unread-mentions-and-DMs compatible view
 - [ ] Threads view, saved items, reminders, and later/to-do view
 - [ ] Search history and keyboard quick switcher
 
