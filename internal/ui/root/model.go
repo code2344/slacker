@@ -91,6 +91,10 @@ type Model struct {
 	editingInThread    bool
 	pendingAction      string
 	pendingMessage     *messageReference
+	reactionPicker     *flex.Model
+	reactionQuery      *tview.TextArea
+	reactionResults    *tree.Model
+	reactionTarget     *messageReference
 	stream             *slack.Realtime
 	realtimeFailures   int
 	imagePreviews      map[string]kittyPreview
@@ -174,7 +178,13 @@ type messageReference struct {
 	contextThread string
 }
 type messageProfileReference struct{ messageReference }
+type userProfileReference struct{ userID string }
 type threadReference struct{ messageReference }
+type reactionChoiceReference struct{ name string }
+type reactionDetailsReference struct {
+	messageReference
+	reaction slack.Reaction
+}
 type threadBackReference struct{ conversation slack.Conversation }
 type inspectorCloseReference struct{}
 type openDMReference struct{ userID string }
@@ -466,6 +476,33 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		if msg.Key() == tcell.KeyCtrlC {
 			return tview.Quit()
 		}
+		if m.reactionPicker != nil {
+			if msg.Key() == tcell.KeyEscape {
+				m.closeReactionPicker()
+				return nil
+			}
+			if msg.Key() == tcell.KeyTab || (msg.Key() == tcell.KeyDown && m.reactionPicker.Focused() == 0) {
+				m.reactionPicker.SetFocus(1)
+				return nil
+			}
+			if msg.Key() == tcell.KeyBacktab {
+				m.reactionPicker.SetFocus(0)
+				return nil
+			}
+			if msg.Key() == tcell.KeyEnter && m.reactionPicker.Focused() == 0 {
+				if node := m.reactionResults.CurrentNode(); node != nil {
+					if choice, ok := node.Reference().(reactionChoiceReference); ok {
+						return m.chooseReaction(choice.name)
+					}
+				}
+				return nil
+			}
+			cmd := m.Layers.Update(msg)
+			if m.reactionPicker.Focused() == 0 {
+				m.refreshReactionPicker()
+			}
+			return cmd
+		}
 		if msg.Key() == tcell.KeyEscape && m.searchMode {
 			m.searchMode = false
 			m.composer.SetText("", false)
@@ -519,8 +556,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 				}
 				return nil
 			case "r":
-				m.pendingAction, m.pendingMessage = "react", &reference
-				m.AddLayer(modal.NewModel().SetText("Add a reaction").AddButtons([]string{"thumbsup", "heart", "joy", "tada", "eyes", "Cancel"}), layers.WithName("message-action"), layers.WithResize(true), layers.WithOverlay())
+				m.openReactionPicker(reference)
 				return nil
 			case "-":
 				own := ownReactionNames(reference.message.Reactions, m.selfUserID)
@@ -585,6 +621,12 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			return m.openConversation(reference)
 		case messageProfileReference:
 			return m.showProfile(reference.message.User)
+		case userProfileReference:
+			return m.showProfile(reference.userID)
+		case reactionChoiceReference:
+			return m.chooseReaction(reference.name)
+		case reactionDetailsReference:
+			return m.showReactionUsers(reference)
 		case openDMReference:
 			m.setMessageNotice("Opening direct message…")
 			return m.openDM(reference.userID)
@@ -887,8 +929,6 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 				if msg.ButtonLabel == "Delete" {
 					return m.deleteMessage(*reference)
 				}
-			case "react":
-				return m.setReaction(*reference, msg.ButtonLabel, true)
 			case "unreact":
 				return m.setReaction(*reference, msg.ButtonLabel, false)
 			}
@@ -1132,7 +1172,7 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 			}
 		}
 		if len(message.Reactions) > 0 {
-			m.addReactionRows(root, message.Reactions)
+			m.addReactionRows(root, reference, message.Reactions)
 		}
 		if message.ReplyCount > 0 {
 			label := "reply"
@@ -1220,7 +1260,7 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 			}
 		}
 		if len(message.Reactions) > 0 {
-			m.addReactionRows(root, message.Reactions)
+			m.addReactionRows(root, reference, message.Reactions)
 		}
 		previousAuthor, previousTime = authorKey, messageTime
 	}
@@ -1455,15 +1495,160 @@ func (m *Model) renderReactions(reactions []slack.Reaction, selfUserID string) s
 	return strings.Join(parts, "  ")
 }
 
-func (m *Model) addReactionRows(root *tree.Node, reactions []slack.Reaction) {
-	lines := m.reactionLines(reactions)
-	if len(lines) == 0 {
-		root.AddChild(tree.NewNode("").SetLine(m.renderMessageLine("  ", m.renderReactions(reactions, m.selfUserID), false)).SetSelectable(false))
+func (m *Model) addReactionRows(root *tree.Node, reference messageReference, reactions []slack.Reaction) {
+	for _, reaction := range reactions {
+		details := reactionDetailsReference{messageReference: reference, reaction: reaction}
+		lines := m.reactionLines([]slack.Reaction{reaction})
+		if len(lines) == 0 {
+			root.AddChild(tree.NewNode("").SetLine(m.renderMessageLine("  ", m.renderReactions([]slack.Reaction{reaction}, m.selfUserID), false)).SetReference(details))
+			continue
+		}
+		for index, line := range lines {
+			node := tree.NewNode("").SetLine(line)
+			if index == 0 {
+				node.SetReference(details)
+			} else {
+				node.SetSelectable(false)
+			}
+			root.AddChild(node)
+		}
+	}
+}
+
+func (m *Model) openReactionPicker(reference messageReference) {
+	m.reactionTarget = &reference
+	m.reactionQuery = tview.NewTextArea()
+	m.reactionQuery.SetTitle("Find an emoji")
+	m.reactionQuery.SetPlaceholder(styledtext.Line{styledtext.NewSegment("Type a name, e.g. party", tcell.StyleDefault.Dim(true))})
+	ui.ConfigureBox(m.reactionQuery.Box, &m.cfg.Theme)
+	m.reactionResults = tree.NewModel()
+	m.reactionResults.SetTopLevel(1).SetTitle("Emoji · Enter adds reaction · Esc closes")
+	ui.ConfigureBox(m.reactionResults.Box, &m.cfg.Theme)
+	m.reactionPicker = flex.NewModel().SetDirection(flex.DirectionRow).
+		AddItem(m.reactionQuery, 3, 0, true).
+		AddItem(m.reactionResults, 0, 1, false)
+	panel := flex.NewModel().SetDirection(flex.DirectionColumn).
+		AddItem(nil, 0, 1, false).
+		AddItem(m.reactionPicker, 72, 0, true).
+		AddItem(nil, 0, 1, false)
+	overlay := flex.NewModel().SetDirection(flex.DirectionRow).
+		AddItem(nil, 2, 0, false).
+		AddItem(panel, 0, 1, true).
+		AddItem(nil, 2, 0, false)
+	m.refreshReactionPicker()
+	m.AddLayer(overlay, layers.WithName("reaction-picker"), layers.WithResize(true), layers.WithOverlay())
+}
+
+func (m *Model) closeReactionPicker() {
+	m.RemoveLayer("reaction-picker")
+	m.reactionPicker, m.reactionQuery, m.reactionResults, m.reactionTarget = nil, nil, nil, nil
+}
+
+func (m *Model) chooseReaction(name string) tview.Cmd {
+	if m.reactionTarget == nil {
+		return nil
+	}
+	reference := *m.reactionTarget
+	m.closeReactionPicker()
+	return m.setReaction(reference, name, true)
+}
+
+func (m *Model) refreshReactionPicker() {
+	if m.reactionResults == nil || m.reactionQuery == nil {
 		return
 	}
-	for _, line := range lines {
-		root.AddChild(tree.NewNode("").SetLine(line).SetSelectable(false))
+	query := strings.ToLower(strings.Trim(strings.TrimSpace(m.reactionQuery.Text()), ":"))
+	type candidate struct {
+		name      string
+		workspace bool
+		rank      int
 	}
+	byName := make(map[string]candidate, len(standardEmojiNames())+len(m.workspaceEmoji))
+	for _, name := range standardEmojiNames() {
+		byName[name] = candidate{name: name, rank: emojiMatchRank(name, query)}
+	}
+	for name := range m.workspaceEmoji {
+		byName[name] = candidate{name: name, workspace: true, rank: emojiMatchRank(name, query)}
+	}
+	candidates := make([]candidate, 0, len(byName))
+	for _, item := range byName {
+		if item.rank >= 0 {
+			candidates = append(candidates, item)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].rank != candidates[j].rank {
+			return candidates[i].rank < candidates[j].rank
+		}
+		if candidates[i].workspace != candidates[j].workspace {
+			return candidates[i].workspace
+		}
+		return candidates[i].name < candidates[j].name
+	})
+	root := tree.NewNode("")
+	for _, item := range candidates[:min(60, len(candidates))] {
+		icon := renderEmojiAliases(":" + item.name + ":")
+		if icon == ":"+item.name+":" {
+			icon = ":" + item.name + ":"
+		}
+		source := ""
+		if item.workspace {
+			source = "  workspace"
+		}
+		root.AddChild(tree.NewNode(fmt.Sprintf("%s  :%s:%s", icon, item.name, source)).SetReference(reactionChoiceReference{name: item.name}))
+	}
+	if len(candidates) == 0 {
+		root.AddChild(tree.NewNode("No matching emoji").SetSelectable(false))
+	}
+	m.reactionResults.SetRoot(root).SetTopLevel(1)
+	if children := root.Children(); len(children) > 0 && children[0].Reference() != nil {
+		m.reactionResults.SetCurrentNode(children[0])
+	}
+}
+
+func emojiMatchRank(name, query string) int {
+	name = strings.ToLower(name)
+	if query == "" {
+		for index, common := range []string{"thumbsup", "heart", "joy", "tada", "eyes", "white_check_mark", "fire", "raised_hands"} {
+			if name == common {
+				return index
+			}
+		}
+		return 100
+	}
+	if name == query {
+		return 0
+	}
+	if strings.HasPrefix(name, query) {
+		return 1
+	}
+	if strings.Contains(name, query) {
+		return 2
+	}
+	return -1
+}
+
+func (m *Model) showReactionUsers(reference reactionDetailsReference) tview.Cmd {
+	root := tree.NewNode("")
+	root.AddChild(tree.NewNode("× Close reactions").SetReference(inspectorCloseReference{}))
+	root.AddChild(tree.NewNode(fmt.Sprintf("%s  :%s:  %d", m.renderEmojiAliases(":"+reference.reaction.Name+":"), reference.reaction.Name, reference.reaction.Count)).SetSelectable(false))
+	root.AddChild(tree.NewNode("").SetSelectable(false))
+	for _, userID := range reference.reaction.Users {
+		name := userID
+		if user, ok := m.users[userID]; ok {
+			name = displayName(user)
+		}
+		root.AddChild(tree.NewNode("@" + name).SetReference(userProfileReference{userID: userID}))
+	}
+	if len(reference.reaction.Users) == 0 {
+		root.AddChild(tree.NewNode("Slack did not return the reacting members.").SetSelectable(false))
+	}
+	m.profile.SetRoot(root).SetTopLevel(1).SetTitle("Reactions")
+	m.activeThread = ""
+	m.inspector.Clear().SetDirection(flex.DirectionRow).AddItem(m.profile, 0, 1, true)
+	m.inspectorKind = "reactions"
+	m.openInspector()
+	return nil
 }
 
 func (m *Model) reactionLines(reactions []slack.Reaction) []styledtext.Line {
@@ -2235,17 +2420,24 @@ func (m *Model) loadProfileDetails(userID string) tview.Cmd {
 func (m *Model) unresolvedUserIDs(messages []slack.Message) []string {
 	seen := make(map[string]bool)
 	var ids []string
-	for _, message := range messages {
-		id := message.User
+	add := func(id string) {
 		if id == "" || seen[id] {
-			continue
+			return
 		}
 		seen[id] = true
 		if user, exists := m.users[id]; (exists && user.ProfileLoaded) || m.userLookups[id] {
-			continue
+			return
 		}
 		m.userLookups[id] = true
 		ids = append(ids, id)
+	}
+	for _, message := range messages {
+		add(message.User)
+		for _, reaction := range message.Reactions {
+			for _, userID := range reaction.Users {
+				add(userID)
+			}
+		}
 	}
 	return ids
 }

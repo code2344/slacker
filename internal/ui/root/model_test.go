@@ -64,6 +64,50 @@ func TestRenderSlackTextConvertsKnownEmojiAndPreservesCustomEmoji(t *testing.T) 
 	}
 }
 
+func TestEmojiMatchRankPrioritisesExactPrefixAndContains(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{name: "party", query: "party", want: 0},
+		{name: "party_parrot", query: "party", want: 1},
+		{name: "blob_party", query: "party", want: 2},
+		{name: "wave", query: "party", want: -1},
+	} {
+		if got := emojiMatchRank(test.name, test.query); got != test.want {
+			t.Errorf("emojiMatchRank(%q, %q) = %d, want %d", test.name, test.query, got, test.want)
+		}
+	}
+}
+
+func TestReactionRowsOpenReactingUserDetails(t *testing.T) {
+	m := &Model{selfUserID: "U1", emojiPreviews: map[string]kittyPreview{}}
+	root := tree.NewNode("")
+	reference := messageReference{message: slack.Message{Timestamp: "1.0"}}
+	reaction := slack.Reaction{Name: "wave", Count: 2, Users: []string{"U1", "U2"}}
+	m.addReactionRows(root, reference, []slack.Reaction{reaction})
+	children := root.Children()
+	if len(children) != 1 {
+		t.Fatalf("reaction rows = %d, want 1", len(children))
+	}
+	details, ok := children[0].Reference().(reactionDetailsReference)
+	if !ok || details.reaction.Name != "wave" || details.message.Timestamp != "1.0" {
+		t.Fatalf("reaction reference = %#v", children[0].Reference())
+	}
+}
+
+func TestUnresolvedUserIDsIncludesReactingMembers(t *testing.T) {
+	m := &Model{users: map[string]slack.User{}, userLookups: map[string]bool{}}
+	got := m.unresolvedUserIDs([]slack.Message{{
+		User:      "U1",
+		Reactions: []slack.Reaction{{Users: []string{"U1", "U2"}}},
+	}})
+	if strings.Join(got, ",") != "U1,U2" {
+		t.Fatalf("unresolved users = %v", got)
+	}
+}
+
 func TestRenderMrkdwnLineAppliesInlineStyles(t *testing.T) {
 	line := renderMrkdwnLine("  ", "*bold* _italic_ ~gone~ `code`", true)
 	if len(line) != 9 {

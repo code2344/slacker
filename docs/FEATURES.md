@@ -36,9 +36,9 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 ## Reactions and emoji
 
 - [x] Display reaction names, counts, whether you reacted, and enlarged custom reaction artwork
-- [x] Add common reactions and remove your own reactions
-- [ ] Full emoji picker and reacting-user list
-- [~] Standard Unicode emoji and workspace aliases render inline; custom workspace emoji render on demand through Kitty graphics, GIF emoji animate, and emoji-only custom messages use jumbo rendering; skin tones and a picker remain planned
+- [x] Add and remove reactions with a searchable standard/workspace emoji picker
+- [x] Click a reaction to list reacting members and open their profiles
+- [~] Standard Unicode emoji and workspace aliases render inline; custom workspace emoji render on demand through Kitty graphics, GIF emoji animate, and emoji-only custom messages use jumbo rendering; skin-tone selection remains planned
 
 ## People and presence
 
