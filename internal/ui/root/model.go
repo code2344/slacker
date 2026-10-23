@@ -100,6 +100,8 @@ type Model struct {
 	imagePreviews      map[string]kittyPreview
 	emojiPreviews      map[string]kittyPreview
 	kittyGraphics      bool
+	clientAnimations   bool
+	animatedPreviews   map[uint32]kittyPreview
 }
 
 type kittyPreview struct {
@@ -109,6 +111,11 @@ type kittyPreview struct {
 	pngData []byte
 	frames  [][]byte
 	delays  []int
+}
+
+type kittyAnimationTickMsg struct {
+	imageID uint32
+	frame   int
 }
 
 type completionCandidate struct {
@@ -252,34 +259,35 @@ func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversation
 		counts = make(map[string]slack.ConversationCount)
 	}
 	m := &Model{
-		Layers:         layers.New(),
-		cfg:            cfg,
-		sidebar:        tree.NewModel(),
-		header:         tview.NewTextView(),
-		messages:       tree.NewModel(),
-		composer:       tview.NewTextArea(),
-		controls:       tview.NewTextView(),
-		main:           flex.NewModel(),
-		right:          flex.NewModel(),
-		inspector:      flex.NewModel(),
-		threadMessages: tree.NewModel(),
-		threadComposer: tview.NewTextArea(),
-		profile:        tree.NewModel(),
-		client:         client,
-		selfUserID:     selfUserID,
-		users:          users,
-		profileFields:  make(map[string]slack.TeamProfileField, len(profileFields)),
-		userLookups:    make(map[string]bool),
-		presences:      make(map[string]slack.UserPresence),
-		dnd:            make(map[string]slack.DNDInfo),
-		profileLookups: make(map[string]bool),
-		counts:         counts,
-		conversations:  make(map[string]slack.Conversation, len(conversations)),
-		imagePreviews:  make(map[string]kittyPreview),
-		emojiPreviews:  make(map[string]kittyPreview),
-		drafts:         make(map[string]string),
-		threadDrafts:   make(map[string]string),
-		workspaceEmoji: make(map[string]string),
+		Layers:           layers.New(),
+		cfg:              cfg,
+		sidebar:          tree.NewModel(),
+		header:           tview.NewTextView(),
+		messages:         tree.NewModel(),
+		composer:         tview.NewTextArea(),
+		controls:         tview.NewTextView(),
+		main:             flex.NewModel(),
+		right:            flex.NewModel(),
+		inspector:        flex.NewModel(),
+		threadMessages:   tree.NewModel(),
+		threadComposer:   tview.NewTextArea(),
+		profile:          tree.NewModel(),
+		client:           client,
+		selfUserID:       selfUserID,
+		users:            users,
+		profileFields:    make(map[string]slack.TeamProfileField, len(profileFields)),
+		userLookups:      make(map[string]bool),
+		presences:        make(map[string]slack.UserPresence),
+		dnd:              make(map[string]slack.DNDInfo),
+		profileLookups:   make(map[string]bool),
+		counts:           counts,
+		conversations:    make(map[string]slack.Conversation, len(conversations)),
+		imagePreviews:    make(map[string]kittyPreview),
+		emojiPreviews:    make(map[string]kittyPreview),
+		animatedPreviews: make(map[uint32]kittyPreview),
+		drafts:           make(map[string]string),
+		threadDrafts:     make(map[string]string),
+		workspaceEmoji:   make(map[string]string),
 	}
 	for _, field := range profileFields {
 		m.profileFields[field.ID] = field
@@ -471,6 +479,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 	case tview.InitMsg:
 		terminal := strings.ToLower(msg.TerminalName + " " + os.Getenv("TERM") + " " + os.Getenv("TERM_PROGRAM"))
 		m.kittyGraphics = strings.Contains(terminal, "kitty") || strings.Contains(terminal, "ghostty") || strings.Contains(terminal, "wezterm")
+		m.clientAnimations = strings.Contains(terminal, "ghostty")
 		return tview.Batch(tview.SetTitle("slacker"), m.connectRealtime(), m.loadWorkspaceEmoji())
 	case tview.KeyMsg:
 		if msg.Key() == tcell.KeyCtrlC {
@@ -694,7 +703,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.showMessages(msg.conversation, msg.messages, msg.hasMore, false)
 		m.composer.SetDisabled(false)
 		m.composer.SetTitle("Message " + m.conversationTitle(msg.conversation))
-		commands := []tview.Cmd{uploadKittyPreviews(msg.previews)}
+		commands := []tview.Cmd{m.uploadKittyPreviews(msg.previews)}
 		if command := m.loadWorkspaceEmojiPreviews(msg.messages); command != nil {
 			commands = append(commands, command)
 		}
@@ -730,7 +739,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.currentHasMore, m.historyCursor = msg.hasMore, msg.cursor
 		m.showMessages(msg.conversation, m.currentMessages, msg.hasMore, false)
 		m.selectMessageTimestamp(msg.selectedTS)
-		return uploadKittyPreviews(msg.previews)
+		return m.uploadKittyPreviews(msg.previews)
 	case conversationMarkedMsg:
 		if msg.err == nil {
 			count := m.counts[msg.conversationID]
@@ -809,7 +818,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.threadComposer.SetText(m.threadDrafts[draftKey(msg.conversation.ID, msg.timestamp)], true)
 		m.showThread(msg.conversation, msg.messages)
 		m.openInspector()
-		commands := []tview.Cmd{uploadKittyPreviews(msg.previews)}
+		commands := []tview.Cmd{m.uploadKittyPreviews(msg.previews)}
 		if len(userIDs) > 0 {
 			commands = append(commands, m.loadAuthors(userIDs, nil, &msg))
 		}
@@ -864,7 +873,22 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		if conversation, ok := m.conversations[m.activeConversation]; ok && m.activeThread != "" && len(m.currentThread) > 0 {
 			m.showThread(conversation, m.currentThread)
 		}
-		return uploadKittyPreviews(msg.previews)
+		return m.uploadKittyPreviews(msg.previews)
+	case kittyAnimationTickMsg:
+		preview, ok := m.animatedPreviews[msg.imageID]
+		if !ok || len(preview.frames) == 0 {
+			return nil
+		}
+		frames := append([][]byte{preview.pngData}, preview.frames...)
+		frame := msg.frame % len(frames)
+		delay := 100
+		if frame < len(preview.delays) {
+			delay = preview.delays[frame]
+		}
+		return tview.Sequence(
+			tview.Raw(kittyImagePayload(frames[frame], preview.imageID, preview.columns, preview.rows)),
+			scheduleKittyAnimation(preview.imageID, (frame+1)%len(frames), delay),
+		)
 	case profileDetailsLoadedMsg:
 		m.presences[msg.userID] = msg.presence
 		m.dnd[msg.userID] = msg.dnd
@@ -2295,7 +2319,7 @@ func (m *Model) jumboEmojiLines(value, prefix string) []styledtext.Line {
 	return lines
 }
 
-func uploadKittyPreviews(previews map[string]kittyPreview) tview.Cmd {
+func (m *Model) uploadKittyPreviews(previews map[string]kittyPreview) tview.Cmd {
 	if len(previews) == 0 {
 		return nil
 	}
@@ -2304,12 +2328,12 @@ func uploadKittyPreviews(previews map[string]kittyPreview) tview.Cmd {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	commands := make([]tview.Cmd, 0, len(ids)+1)
+	commands := make([]tview.Cmd, 0, len(ids)*2+1)
 	for _, id := range ids {
 		preview := previews[id]
 		var payload strings.Builder
 		payload.WriteString(kittyImagePayload(preview.pngData, preview.imageID, preview.columns, preview.rows))
-		if len(preview.frames) > 0 {
+		if len(preview.frames) > 0 && !m.clientAnimations {
 			rootDelay := 100
 			if len(preview.delays) > 0 {
 				rootDelay = preview.delays[0]
@@ -2327,9 +2351,26 @@ func uploadKittyPreviews(previews map[string]kittyPreview) tview.Cmd {
 			fmt.Fprintf(&payload, "\x1b_Ga=a,q=2,i=%d,s=3,v=1\x1b\\", preview.imageID)
 		}
 		commands = append(commands, tview.Raw(payload.String()))
+		if len(preview.frames) > 0 && m.clientAnimations {
+			if _, running := m.animatedPreviews[preview.imageID]; !running {
+				m.animatedPreviews[preview.imageID] = preview
+				delay := 100
+				if len(preview.delays) > 0 {
+					delay = preview.delays[0]
+				}
+				commands = append(commands, scheduleKittyAnimation(preview.imageID, 1, delay))
+			}
+		}
 	}
 	commands = append(commands, func() tview.Msg { return kittyUploadedMsg{} })
 	return tview.Sequence(commands...)
+}
+
+func scheduleKittyAnimation(imageID uint32, frame, delayMS int) tview.Cmd {
+	return func() tview.Msg {
+		time.Sleep(time.Duration(max(20, delayMS)) * time.Millisecond)
+		return kittyAnimationTickMsg{imageID: imageID, frame: frame}
+	}
 }
 
 func (m *Model) loadKittyPreviews(ctx context.Context, messages []slack.Message) map[string]kittyPreview {

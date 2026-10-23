@@ -247,6 +247,25 @@ func TestDecodeKittyPreviewPreservesGIFFrames(t *testing.T) {
 	}
 }
 
+func TestGhosttyAnimationFallbackRegistersDecodedFrames(t *testing.T) {
+	preview := kittyPreview{
+		imageID: 42,
+		columns: 2,
+		rows:    2,
+		pngData: []byte("root"),
+		frames:  [][]byte{[]byte("next")},
+		delays:  []int{50, 80},
+	}
+	m := &Model{clientAnimations: true, animatedPreviews: map[uint32]kittyPreview{}}
+	if command := m.uploadKittyPreviews(map[string]kittyPreview{"party": preview}); command == nil {
+		t.Fatal("animation upload command is nil")
+	}
+	registered, ok := m.animatedPreviews[42]
+	if !ok || len(registered.frames) != 1 || registered.delays[0] != 50 {
+		t.Fatalf("registered animation = %#v", registered)
+	}
+}
+
 func TestJumboEmojiLinesRequireOneToThreeCustomEmoji(t *testing.T) {
 	m := &Model{emojiPreviews: map[string]kittyPreview{
 		"party\x00jumbo": {imageID: 42, columns: 6, rows: 4},

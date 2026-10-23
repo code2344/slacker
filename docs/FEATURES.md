@@ -38,7 +38,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Display reaction names, counts, whether you reacted, and enlarged custom reaction artwork
 - [x] Add and remove reactions with a searchable standard/workspace emoji picker
 - [x] Click a reaction to list reacting members and open their profiles
-- [~] Standard Unicode emoji and workspace aliases render inline; custom workspace emoji render on demand through Kitty graphics, GIF emoji animate, and emoji-only custom messages use jumbo rendering; skin-tone selection remains planned
+- [~] Standard Unicode emoji and workspace aliases render inline; custom workspace emoji render on demand through Kitty graphics, GIF emoji animate with a Ghostty client-driven fallback, and emoji-only custom messages use jumbo rendering; skin-tone selection remains planned
 
 ## People and presence
 
