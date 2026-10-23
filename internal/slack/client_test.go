@@ -72,6 +72,24 @@ func TestCallReturnsAPIError(t *testing.T) {
 	}
 }
 
+func TestEmojiList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/emoji.list" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		io.WriteString(w, `{"ok":true,"emoji":{"party":"https://example.test/party.png","celebrate":"alias:party"}}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	emojis, err := client.EmojiList(context.Background())
+	if err != nil || emojis["party"] == "" || emojis["celebrate"] != "alias:party" {
+		t.Fatalf("EmojiList() = %#v, %v", emojis, err)
+	}
+}
+
 func TestConversationHistory(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/conversations.history" {

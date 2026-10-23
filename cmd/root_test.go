@@ -1,16 +1,29 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/code2344/slacker/internal/consts"
 	"github.com/code2344/slacker/internal/slack"
 )
+
+func TestStartupProgressShowsStage(t *testing.T) {
+	var output bytes.Buffer
+	progress := &startupProgress{w: &output, total: 4, enabled: true}
+	progress.Step("Loading conversations")
+	if got := output.String(); !strings.Contains(got, "1/4") || !strings.Contains(got, "Loading conversations") {
+		t.Fatalf("progress output = %q", got)
+	}
+}
 
 func TestDMActivityCacheFreshness(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dm-activity.json")
@@ -23,6 +36,30 @@ func TestDMActivityCacheFreshness(t *testing.T) {
 	}
 	if _, fresh = readDMActivityCache(path, now.Add(3*time.Minute)); fresh {
 		t.Fatal("expired DM activity cache reported fresh")
+	}
+}
+
+func TestStaleDMActivityCacheDoesNotBlockStartup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		fmt.Fprint(w, `{"ok":true,"messages":[]}`)
+	}))
+	defer server.Close()
+	client, err := slack.NewClient(slack.Session{Token: "xoxc-test", Cookie: "xoxd-test", APIURL: server.URL + "/api/"}, slack.WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	teamID := "T-STALE-CACHE-TEST"
+	cachePath := filepath.Join(consts.CacheDir(), "dm-activity-"+teamID+".json")
+	t.Cleanup(func() { _ = os.Remove(cachePath) })
+	writeDMActivityCache(cachePath, dmActivityCache{UpdatedAt: time.Now().Add(-time.Hour), Latest: map[string]string{"D1": "123.45"}})
+	started := time.Now()
+	conversations := loadRecentDMActivity(context.Background(), client, []slack.Conversation{{ID: "D1", IsIM: true}}, teamID, 0)
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("stale cache blocked startup for %v", elapsed)
+	}
+	if !conversations[0].ActivityChecked || conversations[0].LatestMessageTS != "123.45" {
+		t.Fatalf("cached activity was not applied: %#v", conversations[0])
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	"image/png"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +31,7 @@ import (
 	styledtext "github.com/ayn2op/tview/text"
 	"github.com/ayn2op/tview/tree"
 	"github.com/code2344/slacker/internal/config"
+	"github.com/code2344/slacker/internal/emojicache"
 	"github.com/code2344/slacker/internal/slack"
 	"github.com/code2344/slacker/internal/ui"
 	"github.com/code2344/slacker/internal/usercache"
@@ -71,12 +74,15 @@ type Model struct {
 	activeConversation string
 	activeThread       string
 	currentMessages    []slack.Message
+	currentThread      []slack.Message
 	currentHasMore     bool
 	historyCursor      string
 	historyLoading     bool
 	drafts             map[string]string
 	threadDrafts       map[string]string
 	userCacheKey       string
+	emojiCacheKey      string
+	workspaceEmoji     map[string]string
 	searchMode         bool
 	selfUserID         string
 	editing            *messageReference
@@ -86,6 +92,7 @@ type Model struct {
 	stream             *slack.Realtime
 	realtimeFailures   int
 	imagePreviews      map[string]kittyPreview
+	emojiPreviews      map[string]kittyPreview
 	kittyGraphics      bool
 }
 
@@ -209,6 +216,13 @@ type dmOpenedMsg struct {
 	err          error
 }
 type kittyUploadedMsg struct{}
+type workspaceEmojiLoadedMsg struct {
+	emojis map[string]string
+	err    error
+}
+type workspaceEmojiPreviewsLoadedMsg struct {
+	previews map[string]kittyPreview
+}
 
 type realtimeConnectedMsg struct {
 	stream *slack.Realtime
@@ -248,8 +262,10 @@ func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversation
 		counts:         counts,
 		conversations:  make(map[string]slack.Conversation, len(conversations)),
 		imagePreviews:  make(map[string]kittyPreview),
+		emojiPreviews:  make(map[string]kittyPreview),
 		drafts:         make(map[string]string),
 		threadDrafts:   make(map[string]string),
+		workspaceEmoji: make(map[string]string),
 	}
 	for _, field := range profileFields {
 		m.profileFields[field.ID] = field
@@ -260,6 +276,15 @@ func NewModel(cfg *config.Config, workspaceName, selfUserID string, conversation
 
 func (m *Model) SetUserCacheKey(key string) {
 	m.userCacheKey = key
+}
+
+// SetWorkspaceEmoji makes the cached index available immediately. Init refreshes
+// it in the background so startup never waits for emoji.list.
+func (m *Model) SetWorkspaceEmoji(key string, emojis map[string]string) {
+	m.emojiCacheKey = key
+	if emojis != nil {
+		m.workspaceEmoji = emojis
+	}
 }
 
 func (m *Model) build(workspaceName string, conversations []slack.Conversation, sections []slack.ChannelSection) {
@@ -449,7 +474,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 	case tview.InitMsg:
 		terminal := strings.ToLower(msg.TerminalName + " " + os.Getenv("TERM") + " " + os.Getenv("TERM_PROGRAM"))
 		m.kittyGraphics = strings.Contains(terminal, "kitty") || strings.Contains(terminal, "ghostty") || strings.Contains(terminal, "wezterm")
-		return tview.Batch(tview.SetTitle("slacker"), m.connectRealtime())
+		return tview.Batch(tview.SetTitle("slacker"), m.connectRealtime(), m.loadWorkspaceEmoji())
 	case tview.KeyMsg:
 		if msg.Key() == tcell.KeyCtrlC {
 			return tview.Quit()
@@ -647,6 +672,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.composer.SetDisabled(false)
 		m.composer.SetTitle("Message " + m.conversationTitle(msg.conversation))
 		commands := []tview.Cmd{uploadKittyPreviews(msg.previews)}
+		if command := m.loadWorkspaceEmojiPreviews(msg.messages); command != nil {
+			commands = append(commands, command)
+		}
 		if len(msg.messages) > 0 {
 			commands = append(commands, m.markConversationRead(msg.conversation, msg.messages[0].Timestamp))
 		}
@@ -752,12 +780,16 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		}
 		userIDs := m.unresolvedUserIDs(msg.messages)
 		m.activeThread = msg.timestamp
+		m.currentThread = append(m.currentThread[:0], msg.messages...)
 		m.threadComposer.SetText(m.threadDrafts[draftKey(msg.conversation.ID, msg.timestamp)], true)
 		m.showThread(msg.conversation, msg.messages)
 		m.openInspector()
 		commands := []tview.Cmd{uploadKittyPreviews(msg.previews)}
 		if len(userIDs) > 0 {
 			commands = append(commands, m.loadAuthors(userIDs, nil, &msg))
+		}
+		if command := m.loadWorkspaceEmojiPreviews(msg.messages); command != nil {
+			commands = append(commands, command)
 		}
 		return tview.Batch(commands...)
 	case userLoadedMsg:
@@ -786,6 +818,28 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		if msg.thread != nil {
 			return m.Update(*msg.thread)
 		}
+	case workspaceEmojiLoadedMsg:
+		if msg.err == nil && msg.emojis != nil {
+			m.workspaceEmoji = msg.emojis
+			if m.emojiCacheKey != "" {
+				_ = emojicache.Save(m.emojiCacheKey, msg.emojis)
+			}
+			if conversation, ok := m.conversations[m.activeConversation]; ok && len(m.currentMessages) > 0 {
+				m.showMessages(conversation, m.currentMessages, m.currentHasMore, false)
+			}
+			return m.loadWorkspaceEmojiPreviews(m.currentMessages)
+		}
+	case workspaceEmojiPreviewsLoadedMsg:
+		for name, preview := range msg.previews {
+			m.emojiPreviews[name] = preview
+		}
+		if conversation, ok := m.conversations[m.activeConversation]; ok && len(m.currentMessages) > 0 {
+			m.showMessages(conversation, m.currentMessages, m.currentHasMore, false)
+		}
+		if conversation, ok := m.conversations[m.activeConversation]; ok && m.activeThread != "" && len(m.currentThread) > 0 {
+			m.showThread(conversation, m.currentThread)
+		}
+		return uploadKittyPreviews(msg.previews)
 	case profileDetailsLoadedMsg:
 		m.presences[msg.userID] = msg.presence
 		m.dnd[msg.userID] = msg.dnd
@@ -1039,11 +1093,11 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 		when := formatRelativeTimestamp(message.Timestamp, now)
 		reference := messageReference{conversation: conversation, message: message}
 		if compact {
-			latestNode = tree.NewNode("").SetLine(renderMrkdwnLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
+			latestNode = tree.NewNode("").SetLine(m.renderMessageLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
 			root.AddChild(latestNode)
 		} else {
 			root.AddChild(tree.NewNode(fmt.Sprintf("@%s  %s", author, when)).SetReference(messageProfileReference{messageReference: reference}))
-			latestNode = tree.NewNode("").SetLine(renderMrkdwnLine("  ", text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
+			latestNode = tree.NewNode("").SetLine(m.renderMessageLine("  ", text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
 			root.AddChild(latestNode)
 		}
 		for _, file := range message.Files {
@@ -1063,7 +1117,7 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 			}
 		}
 		if len(message.Reactions) > 0 {
-			root.AddChild(tree.NewNode("  " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
+			root.AddChild(tree.NewNode("").SetLine(m.renderMessageLine("  ", m.renderReactions(message.Reactions, m.selfUserID), false)).SetSelectable(false))
 		}
 		if message.ReplyCount > 0 {
 			label := "reply"
@@ -1112,11 +1166,11 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 		text := prepareMrkdwn(m.resolveSlackEntities(message.Text))
 		reference := messageReference{conversation: conversation, message: message, contextThread: m.activeThread}
 		if compact {
-			latestNode = tree.NewNode("").SetLine(renderMrkdwnLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
+			latestNode = tree.NewNode("").SetLine(m.renderMessageLine(fmt.Sprintf("  %-14s  ", when), text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
 			root.AddChild(latestNode)
 		} else {
 			root.AddChild(tree.NewNode(fmt.Sprintf("@%s  %s", author, when)).SetReference(messageProfileReference{messageReference: reference}))
-			latestNode = tree.NewNode("").SetLine(renderMrkdwnLine("  ", text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
+			latestNode = tree.NewNode("").SetLine(m.renderMessageLine("  ", text, message.Edited != nil)).SetReference(reference).SetExpanded(true)
 			root.AddChild(latestNode)
 		}
 		for _, file := range message.Files {
@@ -1132,7 +1186,7 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 			}
 		}
 		if len(message.Reactions) > 0 {
-			root.AddChild(tree.NewNode("  " + renderReactions(message.Reactions, m.selfUserID)).SetSelectable(false))
+			root.AddChild(tree.NewNode("").SetLine(m.renderMessageLine("  ", m.renderReactions(message.Reactions, m.selfUserID), false)).SetSelectable(false))
 		}
 		previousAuthor, previousTime = authorKey, messageTime
 	}
@@ -1198,7 +1252,69 @@ func (m *Model) resolveSlackEntities(value string) string {
 			return id
 		}
 	})
-	return renderEmojiAliases(html.UnescapeString(value))
+	return m.renderEmojiAliases(html.UnescapeString(value))
+}
+
+func (m *Model) renderEmojiAliases(value string) string {
+	codes := emoji.CodeMap()
+	return emojiAliasPattern.ReplaceAllStringFunc(value, func(alias string) string {
+		if rendered, ok := codes[alias]; ok {
+			return strings.TrimSpace(rendered)
+		}
+		name := strings.Trim(alias, ":")
+		seen := map[string]bool{}
+		for {
+			if seen[name] {
+				return alias
+			}
+			seen[name] = true
+			target, ok := m.workspaceEmoji[name]
+			if _, exists := m.emojiPreviews[name]; exists {
+				return "\x1femoji:" + name + "\x1f"
+			}
+			if !ok || !strings.HasPrefix(target, "alias:") {
+				return alias
+			}
+			name = strings.TrimPrefix(target, "alias:")
+			if rendered, ok := codes[":"+name+":"]; ok {
+				return strings.TrimSpace(rendered)
+			}
+		}
+	})
+}
+
+func (m *Model) renderMessageLine(prefix, value string, edited bool) styledtext.Line {
+	line := styledtext.Line{styledtext.NewSegment(prefix, tcell.StyleDefault)}
+	for len(value) > 0 {
+		start := strings.Index(value, "\x1femoji:")
+		if start < 0 {
+			line = append(line, parseMrkdwnSegments(value, tcell.StyleDefault)...)
+			break
+		}
+		line = append(line, parseMrkdwnSegments(value[:start], tcell.StyleDefault)...)
+		rest := value[start+len("\x1femoji:"):]
+		end := strings.IndexByte(rest, '\x1f')
+		if end < 0 {
+			line = append(line, parseMrkdwnSegments(value[start:], tcell.StyleDefault)...)
+			break
+		}
+		name := rest[:end]
+		if preview, ok := m.emojiPreviews[name]; ok {
+			red := int32((preview.imageID >> 16) & 0xff)
+			green := int32((preview.imageID >> 8) & 0xff)
+			blue := int32(preview.imageID & 0xff)
+			style := tcell.StyleDefault.Foreground(tcell.NewRGBColor(red, green, blue))
+			cell := string([]rune{0x10EEEE, kittyDiacritics[0], kittyDiacritics[0]})
+			line = append(line, styledtext.NewSegment(cell, style))
+		} else {
+			line = append(line, styledtext.NewSegment(":"+name+":", tcell.StyleDefault))
+		}
+		value = rest[end+1:]
+	}
+	if edited {
+		line = append(line, styledtext.NewSegment("  (edited)", tcell.StyleDefault.Italic(true)))
+	}
+	return line
 }
 
 func renderEmojiAliases(value string) string {
@@ -1289,7 +1405,7 @@ func parseMrkdwnSegments(value string, style tcell.Style) styledtext.Line {
 	return line
 }
 
-func renderReactions(reactions []slack.Reaction, selfUserID string) string {
+func (m *Model) renderReactions(reactions []slack.Reaction, selfUserID string) string {
 	parts := make([]string, 0, len(reactions))
 	for _, reaction := range reactions {
 		own := false
@@ -1300,7 +1416,7 @@ func renderReactions(reactions []slack.Reaction, selfUserID string) string {
 		if own {
 			marker = "*"
 		}
-		parts = append(parts, fmt.Sprintf("%s %d%s", renderEmojiAliases(":"+reaction.Name+":"), reaction.Count, marker))
+		parts = append(parts, fmt.Sprintf("%s %d%s", m.renderEmojiAliases(":"+reaction.Name+":"), reaction.Count, marker))
 	}
 	return strings.Join(parts, "  ")
 }
@@ -1504,6 +1620,111 @@ func (m *Model) loadUser(userID string) tview.Cmd {
 		defer cancel()
 		user, err := m.client.UserInfo(ctx, userID)
 		return userLoadedMsg{userID: userID, user: user, err: err}
+	}
+}
+
+func (m *Model) loadWorkspaceEmoji() tview.Cmd {
+	if m.client == nil || m.emojiCacheKey == "" {
+		return nil
+	}
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		emojis, err := m.client.EmojiList(ctx)
+		return workspaceEmojiLoadedMsg{emojis: emojis, err: err}
+	}
+}
+
+func (m *Model) loadWorkspaceEmojiPreviews(messages []slack.Message) tview.Cmd {
+	if !m.kittyGraphics || len(m.workspaceEmoji) == 0 {
+		return nil
+	}
+	targets := make(map[string]string)
+	add := func(name string) {
+		original := name
+		seen := map[string]bool{}
+		for !seen[name] {
+			seen[name] = true
+			target, ok := m.workspaceEmoji[name]
+			if !ok {
+				return
+			}
+			if strings.HasPrefix(target, "alias:") {
+				name = strings.TrimPrefix(target, "alias:")
+				continue
+			}
+			if strings.HasPrefix(target, "https://") {
+				targets[original] = target
+			}
+			return
+		}
+	}
+	for _, message := range messages {
+		for _, alias := range emojiAliasPattern.FindAllString(message.Text, -1) {
+			add(strings.Trim(alias, ":"))
+		}
+		for _, reaction := range message.Reactions {
+			add(reaction.Name)
+		}
+	}
+	for name := range targets {
+		if _, ok := m.emojiPreviews[name]; ok {
+			delete(targets, name)
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	return func() tview.Msg {
+		previews := make(map[string]kittyPreview)
+		client := &http.Client{Timeout: 15 * time.Second}
+		cacheRoot, _ := os.UserCacheDir()
+		for name, target := range targets {
+			if len(previews) >= 32 {
+				break
+			}
+			hash := fnv.New32a()
+			_, _ = hash.Write([]byte(target))
+			imageID := hash.Sum32() & 0xFFFFFF
+			if imageID == 0 {
+				imageID = 1
+			}
+			cachePath := ""
+			var data []byte
+			if cacheRoot != "" {
+				cachePath = filepath.Join(cacheRoot, "slacker", "emoji", fmt.Sprintf("%06x.png", imageID))
+				data, _ = os.ReadFile(cachePath)
+			}
+			if len(data) == 0 {
+				req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
+				if err != nil {
+					continue
+				}
+				response, err := client.Do(req)
+				if err != nil {
+					continue
+				}
+				limited, readErr := io.ReadAll(io.LimitReader(response.Body, 2*1024*1024+1))
+				response.Body.Close()
+				if readErr != nil || response.StatusCode < 200 || response.StatusCode >= 300 || len(limited) > 2*1024*1024 {
+					continue
+				}
+				img, _, err := image.Decode(bytes.NewReader(limited))
+				if err != nil {
+					continue
+				}
+				var encoded bytes.Buffer
+				if png.Encode(&encoded, img) != nil {
+					continue
+				}
+				data = encoded.Bytes()
+				if cachePath != "" && os.MkdirAll(filepath.Dir(cachePath), 0700) == nil {
+					_ = os.WriteFile(cachePath, data, 0600)
+				}
+			}
+			previews[name] = kittyPreview{imageID: imageID, columns: 1, rows: 1, pngData: data}
+		}
+		return workspaceEmojiPreviewsLoadedMsg{previews: previews}
 	}
 }
 
@@ -2066,8 +2287,15 @@ func (m *Model) completeComposerText(value string) (string, string, bool) {
 			candidates = append(candidates, completionCandidate{label: "#" + conversation.Name, replacement: "<#" + id + "|" + conversation.Name + ">"})
 		}
 	case ':':
+		seen := make(map[string]bool)
 		for _, name := range standardEmojiNames() {
 			if strings.HasPrefix(strings.ToLower(name), query) {
+				candidates = append(candidates, completionCandidate{label: ":" + name + ":", replacement: ":" + name + ":"})
+				seen[name] = true
+			}
+		}
+		for name := range m.workspaceEmoji {
+			if !seen[name] && strings.HasPrefix(strings.ToLower(name), query) {
 				candidates = append(candidates, completionCandidate{label: ":" + name + ":", replacement: ":" + name + ":"})
 			}
 		}

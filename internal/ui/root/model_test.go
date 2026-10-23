@@ -396,8 +396,22 @@ func TestOwnReactionNamesAndRendering(t *testing.T) {
 	if got := strings.Join(ownReactionNames(reactions, "U1"), ","); got != "wave" {
 		t.Fatalf("own reactions = %q", got)
 	}
-	if got := renderReactions(reactions, "U1"); got != "👋 2*  👀 1" {
+	if got := (&Model{workspaceEmoji: map[string]string{}}).renderReactions(reactions, "U1"); got != "👋 2*  👀 1" {
 		t.Fatalf("rendered reactions = %q", got)
+	}
+}
+
+func TestWorkspaceEmojiCompletionAndAliases(t *testing.T) {
+	m := &Model{workspaceEmoji: map[string]string{
+		"party_parrot": "https://example.test/party.png",
+		"positive":     "alias:+1",
+	}}
+	got, label, ok := m.completeComposerText("ship :party")
+	if !ok || got != "ship :party_parrot: " || label != ":party_parrot:" {
+		t.Fatalf("completeComposerText() = %q, %q, %v", got, label, ok)
+	}
+	if got := m.renderEmojiAliases(":positive: :party_parrot:"); got != "👍 :party_parrot:" {
+		t.Fatalf("renderEmojiAliases() = %q", got)
 	}
 }
 

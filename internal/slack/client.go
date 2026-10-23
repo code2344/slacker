@@ -60,6 +60,21 @@ func NewClient(session Session, opts ...Option) (*Client, error) {
 
 func (c *Client) APIURL() string { return c.session.APIURL }
 
+// EmojiList returns the workspace emoji index. Values are image URLs or
+// "alias:name" references, matching Slack's emoji.list response.
+func (c *Client) EmojiList(ctx context.Context) (map[string]string, error) {
+	var result struct {
+		Emoji map[string]string `json:"emoji"`
+	}
+	if err := c.Call(ctx, "emoji.list", nil, &result); err != nil {
+		return nil, err
+	}
+	if result.Emoji == nil {
+		result.Emoji = map[string]string{}
+	}
+	return result.Emoji, nil
+}
+
 func (c *Client) Download(ctx context.Context, target string, destination io.Writer) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {

@@ -24,6 +24,7 @@ import (
 	"github.com/code2344/slacker/internal/browserlogin"
 	"github.com/code2344/slacker/internal/config"
 	"github.com/code2344/slacker/internal/consts"
+	"github.com/code2344/slacker/internal/emojicache"
 	"github.com/code2344/slacker/internal/logger"
 	"github.com/code2344/slacker/internal/slack"
 	"github.com/code2344/slacker/internal/slackdesktop"
@@ -741,6 +742,9 @@ func runSend(selector, message string) error {
 }
 
 func runTUI(cfg *config.Config) error {
+	progress := newStartupProgress(os.Stderr, 7)
+	progress.Step("Reading workspace session")
+	defer progress.Clear()
 	meta, client, err := activeClient()
 	if err != nil {
 		if !errors.Is(err, workspace.ErrNoActiveWorkspace) {
@@ -754,6 +758,7 @@ func runTUI(cfg *config.Config) error {
 			return err
 		}
 	}
+	progress.Step("Connecting to Slack")
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	auth, connectErr := client.Connect(ctx)
 	cancel()
@@ -773,12 +778,14 @@ func runTUI(cfg *config.Config) error {
 			return err
 		}
 	}
+	progress.Step("Loading conversations")
 	ctx, cancel = context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	conversations, err := listAllConversations(ctx, client)
 	if err != nil {
 		return err
 	}
+	progress.Step("Restoring sidebar and identities")
 	sections, _ := client.ListChannelSections(ctx)
 	users := usercache.Load(meta.TeamID)
 	if boot, bootErr := client.UserBoot(ctx); bootErr == nil {
@@ -790,15 +797,19 @@ func runTUI(cfg *config.Config) error {
 	if _, ok := users[auth.UserID]; !ok {
 		users[auth.UserID] = slack.User{ID: auth.UserID, Name: auth.User, RealName: auth.User}
 	}
+	progress.Step("Restoring recent direct messages")
 	conversations = loadRecentDMActivity(ctx, client, conversations, meta.TeamID, 0)
 	loadRecentDMUsers(ctx, client, conversations, users, 64)
 	_ = usercache.Save(meta.TeamID, users)
+	progress.Step("Loading workspace details")
 	profileFields, _ := client.TeamProfile(ctx)
 	counts, _ := client.ConversationCounts(ctx)
 	screen, err := tcell.NewScreen()
 	if err != nil {
 		return err
 	}
+	progress.Step("Opening Slacker")
+	progress.Clear()
 	if err := screen.Init(); err != nil {
 		return err
 	}
@@ -809,7 +820,36 @@ func runTUI(cfg *config.Config) error {
 	tview.Styles = tview.Theme{}
 	model := uiroot.NewModel(cfg, meta.Name, auth.UserID, conversations, sections, users, profileFields, counts, client)
 	model.SetUserCacheKey(meta.TeamID)
+	model.SetWorkspaceEmoji(meta.TeamID, emojicache.Load(meta.TeamID))
 	return tview.NewApplication(model, tview.WithScreen(screen)).Run()
+}
+
+type startupProgress struct {
+	w       io.Writer
+	step    int
+	total   int
+	enabled bool
+}
+
+func newStartupProgress(w *os.File, total int) *startupProgress {
+	return &startupProgress{w: w, total: total, enabled: term.IsTerminal(int(w.Fd()))}
+}
+
+func (p *startupProgress) Step(label string) {
+	if !p.enabled {
+		return
+	}
+	p.step = min(p.step+1, p.total)
+	const width = 18
+	filled := width * p.step / p.total
+	bar := strings.Repeat("━", filled) + strings.Repeat("─", width-filled)
+	fmt.Fprintf(p.w, "\r\x1b[2K  Slacker  [%s] %d/%d  %s", bar, p.step, p.total, label)
+}
+
+func (p *startupProgress) Clear() {
+	if p.enabled {
+		fmt.Fprint(p.w, "\r\x1b[2K")
+	}
 }
 
 type dmActivityCache struct {
@@ -831,6 +871,19 @@ func loadRecentDMActivity(ctx context.Context, client *slack.Client, conversatio
 	if cacheFresh {
 		return conversations
 	}
+	if len(cache.Latest) > 0 {
+		copyOfConversations := append([]slack.Conversation(nil), conversations...)
+		go func() {
+			refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			refreshDMActivity(refreshCtx, client, copyOfConversations, cachePath, limit)
+		}()
+		return conversations
+	}
+	return refreshDMActivity(ctx, client, conversations, cachePath, limit)
+}
+
+func refreshDMActivity(ctx context.Context, client *slack.Client, conversations []slack.Conversation, cachePath string, limit int) []slack.Conversation {
 
 	indices := make([]int, 0)
 	for index, conversation := range conversations {

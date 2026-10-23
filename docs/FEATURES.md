@@ -26,7 +26,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Slack mrkdwn display for emphasis, strike, inline/fenced code, quotes, links, mentions, channels, dates, and entities
 - [x] Edit and delete your own messages
 - [~] Rich composer: Slack mrkdwn, multiline input, and inline completion work; formatting toolbar remains planned
-- [~] Tab completion for known users, channels, and standard emoji; popup selection and workspace emoji remain planned
+- [~] Tab completion for known users, channels, standard emoji, and cached workspace emoji; popup selection remains planned
 - [~] In-session channel and thread drafts; persistence and scheduled messages remain planned
 - [ ] Forward/share messages and copy permalinks
 - [ ] Pin/unpin, save-for-later, reminders, and follow-thread controls
@@ -38,7 +38,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [x] Display reaction names, counts, and whether you reacted
 - [x] Add common reactions and remove your own reactions
 - [ ] Full emoji picker and reacting-user list
-- [~] Standard Unicode emoji aliases render inline; workspace emoji, aliases, skin tones, and picker remain planned
+- [~] Standard Unicode emoji and workspace aliases render inline; custom workspace emoji render on demand through Kitty graphics and are cached; skin tones and a picker remain planned
 
 ## People and presence
 
