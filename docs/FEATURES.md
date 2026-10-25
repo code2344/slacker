@@ -29,7 +29,7 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 - [~] Tab completion for known users, channels, standard emoji, and cached workspace emoji; popup selection remains planned
 - [~] In-session channel and thread drafts; persistence and scheduled messages remain planned
 - [~] Copy message permalinks; forwarding/sharing remains planned
-- [ ] Pin/unpin, save-for-later, reminders, and follow-thread controls
+- [~] Pin/unpin messages; save-for-later, reminders, and follow-thread controls remain planned
 - [~] Keyboard message actions; Slack app/workflow actions remain planned
 - [ ] Translation and accessibility alt-text prompts
 

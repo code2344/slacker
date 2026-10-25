@@ -209,6 +209,34 @@ func TestMessagePermalink(t *testing.T) {
 	}
 }
 
+func TestSetMessagePinnedUsesAddAndRemove(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("channel") != "C123" || r.Form.Get("timestamp") != "200.1" {
+			t.Errorf("form = %#v", r.Form)
+		}
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetMessagePinned(context.Background(), "C123", "200.1", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetMessagePinned(context.Background(), "C123", "200.1", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(paths, ","); got != "/api/pins.add,/api/pins.remove" {
+		t.Fatalf("paths = %q", got)
+	}
+}
+
 func TestPostMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/chat.postMessage" {

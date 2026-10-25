@@ -136,6 +136,8 @@ type Message struct {
 	Files      []File         `json:"files"`
 	Reactions  []Reaction     `json:"reactions"`
 	Edited     *MessageEdited `json:"edited"`
+	IsPinned   bool           `json:"is_pinned"`
+	PinnedTo   []string       `json:"pinned_to"`
 }
 
 func (c *Client) UpdateMessage(ctx context.Context, channel, timestamp, text string) (Message, error) {
@@ -163,6 +165,14 @@ func (c *Client) MessagePermalink(ctx context.Context, channel, timestamp string
 		return "", errors.New("Slack returned no message permalink")
 	}
 	return result.Permalink, nil
+}
+
+func (c *Client) SetMessagePinned(ctx context.Context, channel, timestamp string, pinned bool) error {
+	method := "pins.add"
+	if !pinned {
+		method = "pins.remove"
+	}
+	return c.Call(ctx, method, url.Values{"channel": {channel}, "timestamp": {timestamp}}, nil)
 }
 
 func (c *Client) AddReaction(ctx context.Context, channel, timestamp, name string) error {

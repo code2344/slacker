@@ -120,6 +120,33 @@ func TestFallbackActivityUsesUnreadMentionsAndDMsOnly(t *testing.T) {
 	}
 }
 
+func TestRestrictedActivityErrorAcceptsTypedAndHTTPWrappedResponses(t *testing.T) {
+	for _, err := range []error{
+		&slack.APIError{Method: "activity.feed", Code: "team_is_restricted"},
+		fmt.Errorf("Slack activity.feed returned HTTP 403: %s", `{"ok":false,"error":"team_is_restricted"}`),
+		fmt.Errorf("wrapped: %w", &slack.APIError{Method: "activity.feed", Code: "enterprise_is_restricted"}),
+	} {
+		if !isRestrictedActivityError(err) {
+			t.Errorf("did not recognize restricted activity error %q", err)
+		}
+	}
+	if isRestrictedActivityError(fmt.Errorf("Slack activity.feed failed: invalid_auth")) {
+		t.Fatal("invalid_auth was treated as a workspace restriction")
+	}
+}
+
+func TestMessagePinnedInRecognizesBothSlackRepresentations(t *testing.T) {
+	if !messagePinnedIn(slack.Message{IsPinned: true}, "C1") {
+		t.Fatal("is_pinned was ignored")
+	}
+	if !messagePinnedIn(slack.Message{PinnedTo: []string{"C1"}}, "C1") {
+		t.Fatal("pinned_to was ignored")
+	}
+	if messagePinnedIn(slack.Message{PinnedTo: []string{"C2"}}, "C1") {
+		t.Fatal("message pinned elsewhere was treated as pinned in C1")
+	}
+}
+
 func TestReactionRowsOpenReactingUserDetails(t *testing.T) {
 	m := &Model{selfUserID: "U1", emojiPreviews: map[string]kittyPreview{}}
 	root := tree.NewNode("")

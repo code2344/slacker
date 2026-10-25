@@ -255,6 +255,12 @@ type fileOpenedMsg struct {
 	err  error
 }
 type permalinkCopiedMsg struct{ err error }
+type messagePinnedMsg struct {
+	conversation slack.Conversation
+	thread       string
+	pinned       bool
+	err          error
+}
 type dmOpenedMsg struct {
 	conversation slack.Conversation
 	err          error
@@ -448,7 +454,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	m.composer.SetDisabled(true)
 	m.composer.SetTitle("Composer")
 	ui.ConfigureBox(m.composer.Box, &m.cfg.Theme)
-	m.controls.SetText("  Enter send   Shift+Enter newline   Tab complete   u next unread   ↑ older   t thread   r react   p copy link   e edit   d delete   / search").SetScrollable(false).SetWrap(false)
+	m.controls.SetText("  Enter send   Shift+Enter newline   Tab complete   u next unread   ↑ older   t thread   r react   i pin   p copy link   e edit   d delete   / search").SetScrollable(false).SetWrap(false)
 
 	m.right.SetDirection(flex.DirectionRow).
 		AddItem(m.header, 2, 0, false).
@@ -595,6 +601,10 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			case "p":
 				m.messages.SetTitle("Copying message link…")
 				return m.copyMessagePermalink(reference)
+			case "i":
+				pinned := !messagePinnedIn(reference.message, reference.conversation.ID)
+				m.messages.SetTitle(map[bool]string{true: "Pinning message…", false: "Unpinning message…"}[pinned])
+				return m.setMessagePinned(reference, pinned)
 			case "-":
 				own := ownReactionNames(reference.message.Reactions, m.selfUserID)
 				if len(own) > 0 {
@@ -893,8 +903,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		}
 	case activityLoadedMsg:
 		if msg.err != nil {
-			var apiErr *slack.APIError
-			if errors.As(msg.err, &apiErr) && apiErr.Code == "team_is_restricted" {
+			if isRestrictedActivityError(msg.err) {
 				m.messages.SetTitle("Activity · loading compatible view…")
 				return m.loadActivityFallback()
 			}
@@ -1004,6 +1013,15 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			m.messages.SetTitle("Message link copied")
 		}
 		return nil
+	case messagePinnedMsg:
+		if msg.err != nil {
+			m.messages.SetTitle(map[bool]string{true: "Pin failed: ", false: "Unpin failed: "}[msg.pinned] + msg.err.Error())
+			return nil
+		}
+		if msg.thread != "" {
+			return m.loadThread(msg.conversation, msg.thread)
+		}
+		return m.loadHistory(msg.conversation)
 	case realtimeConnectedMsg:
 		if msg.err != nil {
 			return m.reconnectRealtime()
@@ -1277,6 +1295,9 @@ func (m *Model) showMessages(conversation slack.Conversation, messages []slack.M
 			root.AddChild(tree.NewNode(fmt.Sprintf("@%s  %s", author, when)).SetReference(messageProfileReference{messageReference: reference}))
 			latestNode = addWrappedTreeRows(root, m.renderMessageLine("  ", text, message.Edited != nil), messageTreeWidth(m.messages), 2, reference)
 		}
+		if messagePinnedIn(message, conversation.ID) {
+			root.AddChild(tree.NewNode("  📌 Pinned").SetSelectable(false))
+		}
 		for _, file := range message.Files {
 			name := file.Title
 			if name == "" {
@@ -1366,6 +1387,9 @@ func (m *Model) showThread(conversation slack.Conversation, messages []slack.Mes
 		} else {
 			root.AddChild(tree.NewNode(fmt.Sprintf("@%s  %s", author, when)).SetReference(messageProfileReference{messageReference: reference}))
 			latestNode = addWrappedTreeRows(root, m.renderMessageLine("  ", text, message.Edited != nil), messageTreeWidth(m.threadMessages), 2, reference)
+		}
+		if messagePinnedIn(message, conversation.ID) {
+			root.AddChild(tree.NewNode("  📌 Pinned").SetSelectable(false))
 		}
 		for _, file := range message.Files {
 			kind := "file"
@@ -2301,6 +2325,18 @@ func (m *Model) loadActivity() tview.Cmd {
 	}
 }
 
+func isRestrictedActivityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *slack.APIError
+	if errors.As(err, &apiErr) && (apiErr.Code == "team_is_restricted" || apiErr.Code == "enterprise_is_restricted") {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "team_is_restricted") || strings.Contains(message, "enterprise_is_restricted")
+}
+
 func (m *Model) loadActivityBodies(refs map[string][]string) tview.Cmd {
 	if len(refs) == 0 {
 		return nil
@@ -2534,6 +2570,22 @@ func (m *Model) copyMessagePermalink(reference messageReference) tview.Cmd {
 			return permalinkCopiedMsg{err: err}
 		}
 		return permalinkCopiedMsg{err: copyText(permalink)}
+	}
+}
+
+func messagePinnedIn(message slack.Message, conversationID string) bool {
+	if message.IsPinned {
+		return true
+	}
+	return slices.Contains(message.PinnedTo, conversationID)
+}
+
+func (m *Model) setMessagePinned(reference messageReference, pinned bool) tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err := m.client.SetMessagePinned(ctx, reference.conversation.ID, reference.message.Timestamp, pinned)
+		return messagePinnedMsg{conversation: reference.conversation, thread: reference.contextThread, pinned: pinned, err: err}
 	}
 }
 
