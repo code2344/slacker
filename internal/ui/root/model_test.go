@@ -98,7 +98,7 @@ func TestActivityContextCoversMentionsThreadsReactionsAndDMs(t *testing.T) {
 	}
 }
 
-func TestFallbackActivityUsesUnreadMentionsAndDMsOnly(t *testing.T) {
+func TestFallbackActivityUsesUnreadMessagesMentionsAndDMs(t *testing.T) {
 	count := slack.ConversationCount{LastRead: "100.0", UnreadCount: 3, MentionCount: 1}
 	messages := []slack.Message{
 		{Timestamp: "104.0", User: "U2", Text: "hello <@U1>"},
@@ -107,7 +107,7 @@ func TestFallbackActivityUsesUnreadMentionsAndDMsOnly(t *testing.T) {
 		{Timestamp: "099.0", User: "U2", Text: "old <@U1> message"},
 	}
 	items, bodies := fallbackActivityForConversation(slack.Conversation{ID: "C1", IsChannel: true}, count, messages, "U1")
-	if len(items) != 1 || items[0].Type != "at_user" || items[0].Timestamp != "104.0" {
+	if len(items) != 2 || items[0].Type != "at_user" || items[0].Timestamp != "104.0" || items[1].Type != "channel" {
 		t.Fatalf("channel fallback items = %#v", items)
 	}
 	if body := bodies[slack.ActivityMessageKey("C1", "104.0")]; body.Text != "hello <@U1>" {

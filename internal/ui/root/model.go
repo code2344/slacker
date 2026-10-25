@@ -92,6 +92,9 @@ type Model struct {
 	activityView       bool
 	activityHydrated   bool
 	activityFallback   bool
+	threadsView        bool
+	threadInbox        []slack.ThreadSummary
+	threadInboxHasMore bool
 	pendingMessageTS   string
 	searchMode         bool
 	selfUserID         string
@@ -250,6 +253,11 @@ type activityFallbackLoadedMsg struct {
 	bodies map[string]slack.ActivityMessage
 	err    error
 }
+type threadInboxLoadedMsg struct {
+	threads []slack.ThreadSummary
+	hasMore bool
+	err     error
+}
 type fileOpenedMsg struct {
 	path string
 	err  error
@@ -350,6 +358,7 @@ func (m *Model) build(workspaceName string, conversations []slack.Conversation, 
 	m.apps = apps
 	root.AddChild(tree.NewNode(m.unreadLabel()).SetReference(sidebarViewReference("unreads")))
 	root.AddChild(tree.NewNode("🔔  Activity").SetReference(sidebarViewReference("activity")))
+	root.AddChild(tree.NewNode("🧵  Threads").SetReference(sidebarViewReference("threads")))
 	root.AddChild(tree.NewNode("💬  DMs").SetReference(sidebarViewReference("dms")))
 	root.AddChild(dms)
 	sectionNodes := map[string]*tree.Node{}
@@ -661,6 +670,9 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			case "activity":
 				m.openActivity()
 				return m.loadActivity()
+			case "threads":
+				m.openThreads()
+				return m.loadThreadInbox()
 			case "dms":
 				m.sidebar.SetRoot(m.dmSidebarRoot).SetTitle("Direct messages")
 			case "home":
@@ -687,6 +699,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			if reference.message.ThreadTS != "" {
 				timestamp = reference.message.ThreadTS
 			}
+			m.activeConversation = reference.conversation.ID
 			return m.loadThread(reference.conversation, timestamp)
 		case threadBackReference:
 			m.closeInspector()
@@ -699,6 +712,7 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 			return m.downloadAndOpen(reference.file)
 		case searchMessageReference:
 			m.activityView = false
+			m.threadsView = false
 			conversation := reference.match.Channel
 			if known, ok := m.conversations[conversation.ID]; ok {
 				conversation = known
@@ -900,6 +914,8 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		}
 		if m.activityView {
 			m.showActivity()
+		} else if m.threadsView {
+			m.showThreadInbox(m.threadInboxHasMore)
 		}
 	case activityLoadedMsg:
 		if msg.err != nil {
@@ -935,10 +951,25 @@ func (m *Model) Update(msg tview.Msg) tview.Cmd {
 		m.activityItems, m.activityBodies = msg.items, msg.bodies
 		m.activityFallback = true
 		m.activityHydrated = true
-		m.header.SetText("Activity\nUnread mentions and direct messages").SetScrollable(false).SetWrap(false)
+		m.header.SetText("Activity\nUnread messages, mentions, and direct messages").SetScrollable(false).SetWrap(false)
 		m.showActivity()
 		m.messages.SetTitle("Activity · compatible view")
 		if userIDs := m.unresolvedActivityUserIDs(); len(userIDs) > 0 {
+			return m.loadAuthors(userIDs, nil, nil)
+		}
+	case threadInboxLoadedMsg:
+		if msg.err != nil {
+			m.messages.SetTitle("Threads failed")
+			m.messages.SetRoot(tree.NewNode("").AddChild(tree.NewNode(msg.err.Error()).SetSelectable(false))).SetTopLevel(1)
+			break
+		}
+		m.threadInbox, m.threadInboxHasMore = msg.threads, msg.hasMore
+		m.showThreadInbox(msg.hasMore)
+		messages := make([]slack.Message, 0, len(msg.threads))
+		for _, thread := range msg.threads {
+			messages = append(messages, slack.Message{User: thread.UserID})
+		}
+		if userIDs := m.unresolvedUserIDs(messages); len(userIDs) > 0 {
 			return m.loadAuthors(userIDs, nil, nil)
 		}
 	case activityBodiesLoadedMsg:
@@ -2307,6 +2338,7 @@ func (m *Model) openActivity() {
 	m.saveActiveDraft()
 	m.closeInspector()
 	m.activityView = true
+	m.threadsView = false
 	m.activityFallback = false
 	m.header.SetText("Activity\nMentions, thread replies, reactions, and direct messages").SetScrollable(false).SetWrap(false)
 	m.messages.SetRoot(tree.NewNode("").AddChild(tree.NewNode("Loading activity…").SetSelectable(false))).SetTopLevel(1).SetTitle("Activity")
@@ -2314,6 +2346,28 @@ func (m *Model) openActivity() {
 	m.composer.SetDisabled(true)
 	m.composer.SetTitle("Activity")
 	m.right.SetFocus(rightMessagesIndex)
+}
+
+func (m *Model) openThreads() {
+	m.saveActiveDraft()
+	m.closeInspector()
+	m.activityView = false
+	m.threadsView = true
+	m.header.SetText("Threads\nUnread replies in threads you follow").SetScrollable(false).SetWrap(false)
+	m.messages.SetRoot(tree.NewNode("").AddChild(tree.NewNode("Loading threads…").SetSelectable(false))).SetTopLevel(1).SetTitle("Threads")
+	m.composer.SetText("", false)
+	m.composer.SetDisabled(true)
+	m.composer.SetTitle("Threads")
+	m.right.SetFocus(rightMessagesIndex)
+}
+
+func (m *Model) loadThreadInbox() tview.Cmd {
+	return func() tview.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		threads, hasMore, err := m.client.UnreadThreads(ctx, "")
+		return threadInboxLoadedMsg{threads: threads, hasMore: hasMore, err: err}
+	}
 }
 
 func (m *Model) loadActivity() tview.Cmd {
@@ -2357,8 +2411,8 @@ func (m *Model) loadActivityFallback() tview.Cmd {
 	targets := make([]target, 0)
 	for id, count := range m.counts {
 		conversation, ok := m.conversations[id]
-		unreadDM := ok && (conversation.IsIM || conversation.IsMPIM) && (count.UnreadCount > 0 || (count.Latest != "" && count.Latest > count.LastRead))
-		if !ok || (count.MentionCount == 0 && !unreadDM) {
+		unread := count.UnreadCount > 0 || count.MentionCount > 0 || (count.Latest != "" && count.Latest > count.LastRead)
+		if !ok || !unread {
 			continue
 		}
 		targets = append(targets, target{conversation: conversation, count: count})
@@ -2383,6 +2437,17 @@ func (m *Model) loadActivityFallback() tview.Cmd {
 				bodies[key] = body
 			}
 		}
+		if threads, _, err := m.client.UnreadThreads(ctx, ""); err == nil {
+			for _, thread := range threads {
+				latest := thread.LatestReply
+				if latest == "" {
+					latest = thread.ThreadTS
+				}
+				key := "fallback-thread:" + thread.ChannelID + ":" + thread.ThreadTS
+				items = append(items, slack.ActivityItem{Key: key, Type: "thread_v2", IsUnread: true, FeedTS: latest, ChannelID: thread.ChannelID, Timestamp: thread.ThreadTS, ThreadTS: thread.ThreadTS, AuthorID: thread.UserID})
+				bodies[slack.ActivityMessageKey(thread.ChannelID, thread.ThreadTS)] = slack.ActivityMessage{Text: thread.Text, UserID: thread.UserID}
+			}
+		}
 		sort.SliceStable(items, func(i, j int) bool { return items[i].FeedTS > items[j].FeedTS })
 		if len(items) > 50 {
 			items = items[:50]
@@ -2405,6 +2470,8 @@ func fallbackActivityForConversation(conversation slack.Conversation, count slac
 			itemType = "dm"
 		case selfUserID != "" && strings.Contains(message.Text, mention):
 			itemType = "at_user"
+		default:
+			itemType = "channel"
 		}
 		if itemType == "" {
 			continue
@@ -2483,6 +2550,51 @@ func (m *Model) showActivity() {
 	} else if children := root.Children(); len(children) > 0 && children[0].Reference() != nil {
 		m.messages.SetCurrentNode(children[0])
 	}
+}
+
+func (m *Model) showThreadInbox(hasMore bool) {
+	root := tree.NewNode("")
+	if len(m.threadInbox) == 0 {
+		root.AddChild(tree.NewNode("No unread thread replies").SetSelectable(false))
+	}
+	for _, summary := range m.threadInbox {
+		conversation, ok := m.conversations[summary.ChannelID]
+		if !ok {
+			conversation = slack.Conversation{ID: summary.ChannelID, Name: summary.ChannelID}
+		}
+		author := summary.UserID
+		if user, exists := m.users[summary.UserID]; exists {
+			author = displayName(user)
+		}
+		if author == "" {
+			author = "Slack"
+		}
+		latest := summary.LatestReply
+		if latest == "" {
+			latest = summary.ThreadTS
+		}
+		message := slack.Message{User: summary.UserID, Text: summary.Text, Timestamp: summary.ThreadTS, ThreadTS: summary.ThreadTS, ReplyCount: summary.ReplyCount}
+		reference := threadReference{messageReference: messageReference{conversation: conversation, message: message}}
+		label := fmt.Sprintf("@%s  in %s  %s", author, m.conversationTitle(conversation), formatRelativeTimestamp(latest, time.Now()))
+		root.AddChild(tree.NewNode(label).SetReference(reference))
+		preview := strings.TrimSpace(m.renderSlackText(summary.Text))
+		if preview == "" {
+			preview = "Thread message"
+		}
+		for _, line := range wrapStyledLine(styledtext.Line{styledtext.NewSegment("  "+preview, tcell.StyleDefault)}, messageTreeWidth(m.messages), 2) {
+			root.AddChild(tree.NewNode("").SetLine(line).SetSelectable(false))
+		}
+		replyLabel := "replies"
+		if summary.UnreadReplies == 1 {
+			replyLabel = "reply"
+		}
+		root.AddChild(tree.NewNode(fmt.Sprintf("  [%d unread %s — open thread]", summary.UnreadReplies, replyLabel)).SetReference(reference))
+		root.AddChild(tree.NewNode("").SetSelectable(false))
+	}
+	if hasMore {
+		root.AddChild(tree.NewNode("More unread threads are available in Slack").SetSelectable(false))
+	}
+	m.messages.SetRoot(root).SetTopLevel(1).SetTitle("Threads")
 }
 
 func activityContext(item slack.ActivityItem, where string) string {
@@ -3289,6 +3401,7 @@ func (m *Model) openConversation(conversationID string) tview.Cmd {
 	}
 	m.saveActiveDraft()
 	m.activityView = false
+	m.threadsView = false
 	m.closeInspector()
 	m.activeConversation, m.activeThread = conversationID, ""
 	m.restoreConversationDraft(conversationID)

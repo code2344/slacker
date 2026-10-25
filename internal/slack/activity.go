@@ -34,6 +34,16 @@ type ActivityMessage struct {
 	UserID string
 }
 
+type ThreadSummary struct {
+	ChannelID     string
+	ThreadTS      string
+	LatestReply   string
+	UserID        string
+	Text          string
+	ReplyCount    int
+	UnreadReplies int
+}
+
 type activityRawItem struct {
 	IsUnread bool   `json:"is_unread"`
 	IsBot    bool   `json:"is_bot"`
@@ -201,4 +211,38 @@ func (c *Client) ActivityMessages(ctx context.Context, refs map[string][]string)
 		}
 	}
 	return result, nil
+}
+
+func (c *Client) UnreadThreads(ctx context.Context, currentTS string) ([]ThreadSummary, bool, error) {
+	params := url.Values{"limit": {"10"}}
+	if currentTS != "" {
+		params.Set("current_ts", currentTS)
+	}
+	var response struct {
+		HasMore bool `json:"has_more"`
+		Threads []struct {
+			Root struct {
+				User        string `json:"user"`
+				Text        string `json:"text"`
+				Timestamp   string `json:"ts"`
+				ThreadTS    string `json:"thread_ts"`
+				Channel     string `json:"channel"`
+				ReplyCount  int    `json:"reply_count"`
+				LatestReply string `json:"latest_reply"`
+			} `json:"root_msg"`
+			UnreadReplies int `json:"unread_replies"`
+		} `json:"threads"`
+	}
+	if err := c.Call(ctx, "subscriptions.thread.getView", params, &response); err != nil {
+		return nil, false, err
+	}
+	threads := make([]ThreadSummary, 0, len(response.Threads))
+	for _, item := range response.Threads {
+		threadTS := item.Root.ThreadTS
+		if threadTS == "" {
+			threadTS = item.Root.Timestamp
+		}
+		threads = append(threads, ThreadSummary{ChannelID: item.Root.Channel, ThreadTS: threadTS, LatestReply: item.Root.LatestReply, UserID: item.Root.User, Text: item.Root.Text, ReplyCount: item.Root.ReplyCount, UnreadReplies: item.UnreadReplies})
+	}
+	return threads, response.HasMore, nil
 }

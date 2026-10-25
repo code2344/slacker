@@ -237,6 +237,33 @@ func TestSetMessagePinnedUsesAddAndRemove(t *testing.T) {
 	}
 }
 
+func TestUnreadThreads(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/subscriptions.thread.getView" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("limit") != "10" {
+			t.Errorf("form = %#v", r.Form)
+		}
+		io.WriteString(w, `{"ok":true,"has_more":true,"threads":[{"root_msg":{"user":"U1","text":"root","ts":"100.1","channel":"C1","reply_count":4,"latest_reply":"104.1"},"unread_replies":2}]}`)
+	}))
+	defer server.Close()
+	client, err := NewClient(Session{Token: "xoxc-token", Cookie: "xoxd-session", APIURL: server.URL + "/api/"}, WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	threads, hasMore, err := client.UnreadThreads(context.Background(), "")
+	if err != nil || !hasMore || len(threads) != 1 {
+		t.Fatalf("UnreadThreads() = %#v, %v, %v", threads, hasMore, err)
+	}
+	if got := threads[0]; got.ChannelID != "C1" || got.ThreadTS != "100.1" || got.LatestReply != "104.1" || got.UnreadReplies != 2 {
+		t.Fatalf("thread = %#v", got)
+	}
+}
+
 func TestPostMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/chat.postMessage" {

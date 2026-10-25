@@ -62,8 +62,8 @@ Legend: `[x]` available, `[~]` partial, `[ ]` planned, `[-]` better opened in a 
 ## Search and activity
 
 - [~] Message and file search; channel/people search and richer filters remain planned
-- [~] Activity view with mentions, thread replies, reactions, DMs, channel notifications, reminders, and direct navigation; restricted workspaces use an unread-mentions-and-DMs compatible view
-- [ ] Threads view, saved items, reminders, and later/to-do view
+- [~] Activity view with mentions, thread replies, reactions, DMs, channel notifications, reminders, and direct navigation; restricted workspaces use an unread-messages-and-DMs compatible view
+- [~] Unread Threads view with direct thread opening; read threads, saved items, reminders, and later/to-do view remain planned
 - [ ] Search history and keyboard quick switcher
 
 ## Calls and collaboration
